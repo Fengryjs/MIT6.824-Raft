@@ -74,8 +74,9 @@ type Raft struct {
 
 	ElectionTimer time.Time
 
-	snapshot     Snapshot
-	snapshotLock bool
+	snapshot         Snapshot
+	snapshotLock     bool
+	snapshotMsgApply bool
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -132,6 +133,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.snapshot)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
 	//fmt.Printf("[persist]: %v %v %v\n", rf.currentTerm, rf.votedFor, rf.log)
@@ -150,13 +152,15 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []Log
+	var snapshot Snapshot
 	if d.Decode(&currentTerm) != nil ||
-		d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&snapshot) != nil {
 
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.snapshot = snapshot
 	}
 	//fmt.Printf("[readPersist]: %v %v %v\n", currentTerm, votedFor, log)
 }
@@ -172,10 +176,10 @@ func (rf *Raft) readPersist(data []byte) {
 // 此时需要先调用InstallSnapshot，使得那边的内容丢弃，仅保留可能需要用到的log
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.snapshotLock = true
 	fmt.Printf("[Snapshot]: snapshot before lock\n")
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.snapshotLock = true
 	fmt.Printf("[Snapshot]: Raft %v, Index %v Bytes %v\n", rf.me, index, snapshot)
 	applyMsg := ApplyMsg{
 		CommandValid:  false,
@@ -194,21 +198,23 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	for rf.log[logIndex].CommandIndex != index {
 		logIndex++
 	}
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	raftstate := w.Bytes()
 	applyMsg.SnapshotTerm = rf.log[logIndex].Term
 	rf.log = rf.log[logIndex+1:]
 	// Save
-	rf.persister.Save(raftstate, snapshot)
 	rf.snapshot = Snapshot{
 		LastIncludedIndex: applyMsg.SnapshotIndex,
 		LastIncludedTerm:  applyMsg.SnapshotTerm,
 		State:             nil,
 	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	e.Encode(rf.snapshot)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, snapshot)
+
 	go rf.ApplySnapshotMsg(applyMsg, index)
 }
 func (rf *Raft) ApplySnapshotMsg(applyMsg ApplyMsg, index int) {
@@ -360,7 +366,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	if len(args.Entries) == 0 {
 		if args.LeaderCommit > rf.commitIndex && len(rf.log) > 0 && args.PrevLogIndex > 0 {
-			rf.commitIndex = min(args.LeaderCommit, rf.log[args.PrevLogIndex-rf.snapshot.LastIncludedIndex-1].CommandIndex)
+			fmt.Printf("[AppendingEntries]: %v commitIndex %v with args %v\n", rf.me, rf.commitIndex, args)
+			if args.PrevLogIndex == rf.snapshot.LastIncludedIndex {
+				rf.commitIndex = rf.snapshot.LastIncludedIndex
+			} else {
+				rf.commitIndex = min(args.LeaderCommit, rf.log[args.PrevLogIndex-rf.snapshot.LastIncludedIndex-1].CommandIndex)
+			}
 		}
 		return
 	}
@@ -412,6 +423,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Term = rf.currentTerm
 	if reply.Term > args.Term {
 		fmt.Printf("[InstallSnapshot]: receiver Raft %v term %v is larger than Leader %v term %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+		rf.mu.Unlock()
 		return
 	}
 	rf.currentTerm = args.Term
@@ -421,7 +433,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.snapshot.LastIncludedIndex = args.LastIncludedIndex
 		rf.snapshot.LastIncludedTerm = args.LastIncludedTerm
 		rf.persister.Save(rf.persister.ReadRaftState(), args.Data)
+		rf.snapshotMsgApply = true
+	} else {
+		rf.mu.Unlock()
+		return
 	}
+	go rf.ApplySnapshotCommandMsg(args.Data)
 	// 6. If existing log entry has same index and term as snapshot’s
 	// last included entry, retain log entries following it and reply
 	index := 0
@@ -429,6 +446,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		if rf.log[index].CommandIndex == args.LastIncludedIndex && rf.log[index].Term == args.LastIncludedTerm {
 			rf.log = rf.log[index+1:]
 			fmt.Printf("[InstallSnapshot]: Raft %v retain log %v\n", rf.me, rf.log)
+			rf.mu.Unlock()
 			return
 		}
 		index = index + 1
@@ -436,11 +454,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// 7. Discard the entire log
 	rf.log = make([]Log, 0)
 	rf.mu.Unlock()
-	data := bytes.NewBuffer(args.Data)
+	fmt.Printf("[InstallSnapshot]: Raft %v discard all log\n", rf.me)
+}
+func (rf *Raft) ApplySnapshotCommandMsg(snapshot []byte) {
+	data := bytes.NewBuffer(snapshot)
 	decoder := labgob.NewDecoder(data)
 	var lastIncludedIndex int
 	var xlog []interface{}
 	if decoder.Decode(&lastIncludedIndex) == nil && decoder.Decode(&xlog) == nil {
+		fmt.Printf("[ApplySnapshotCommandMsg]: lastIndex %v xlog %v\n", lastIncludedIndex, xlog)
 		for {
 			rf.mu.Lock()
 			if rf.snapshotLock {
@@ -450,6 +472,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			}
 			if rf.lastApplied < lastIncludedIndex {
 				rf.lastApplied = rf.lastApplied + 1
+				//rf.commitIndex = max(rf.commitIndex, rf.lastApplied)
 				applyMsg := ApplyMsg{
 					CommandValid:  true,
 					Command:       xlog[rf.lastApplied],
@@ -463,17 +486,20 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 				rf.applyCh <- applyMsg
 				rf.mu.Unlock()
 			} else {
+				rf.snapshotMsgApply = false
 				rf.mu.Unlock()
 				return
 			}
 			time.Sleep(3 * time.Millisecond)
 		}
 	}
-	fmt.Printf("[InstallSnapshot]: Raft %v discard all log\n", rf.me)
 }
-
 func (rf *Raft) SendInstallSnapshot(server int) {
 	rf.mu.Lock()
+	if rf.nextIndex[server] >= rf.snapshot.LastIncludedIndex || rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
 	installSnapshotArgs := InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -502,7 +528,6 @@ func (rf *Raft) SendInstallSnapshot(server int) {
 	} else {
 		fmt.Printf("[Replicate]: %v install snapshot to %v fail exceeds time limit\n", rf.me, server)
 	}
-	time.Sleep(1 * time.Millisecond)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -685,12 +710,12 @@ func (rf *Raft) ApplyLog() {
 	//fmt.Printf("%v %v\n", rf.log, rf.lastApplied)
 	for {
 		rf.mu.Lock()
-		//fmt.Printf("[ApplyLog]: Raft %v LastApplied %v CommitIndex %v\n", rf.me, rf.lastApplied, rf.commitIndex)
-		//fmt.Printf("[ApplyLog]: Log %v\n", rf.log)
-		if rf.commitIndex <= rf.lastApplied || rf.snapshotLock == true {
+		//fmt.Printf("[ApplyLog]: Raft %v LastApplied %v CommitIndex %v %v %v\n", rf.me, rf.lastApplied, rf.commitIndex, rf.snapshotLock, rf.snapshotMsgApply)
+		if rf.commitIndex <= rf.lastApplied || rf.snapshotLock == true || rf.snapshotMsgApply == true {
 			rf.mu.Unlock()
 			return
 		}
+		fmt.Printf("[ApplyLog]: %v\n", rf)
 		logIndex := 0
 		for len(rf.log) > 0 && rf.log[logIndex].CommandIndex-1 != rf.lastApplied {
 			logIndex++
@@ -707,9 +732,9 @@ func (rf *Raft) ApplyLog() {
 		fmt.Printf("[Ticker]: Raft %v Apply Msg %v %v\n", rf.me, applyMsg.CommandIndex, applyMsg.Command)
 		rf.applyCh <- applyMsg
 		rf.lastApplied = rf.lastApplied + 1
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(3 * time.Millisecond)
 		rf.mu.Unlock()
-		time.Sleep(1 * time.Millisecond)
+		//time.Sleep(3 * time.Millisecond)
 		//fmt.Printf("[Ticker]: %v %v\n", rf.commitIndex, rf.lastApplied)
 
 	}
