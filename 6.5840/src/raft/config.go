@@ -181,7 +181,6 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 
 // returns "" or error string
 func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
-	fmt.Printf("[ingestSnap]: Raft %v\n", i)
 	if snapshot == nil {
 		log.Fatalf("nil snapshot")
 		return "nil snapshot"
@@ -584,7 +583,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				//fmt.Printf("[one.nCommited]: %v %v\n", nd, cmd1)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

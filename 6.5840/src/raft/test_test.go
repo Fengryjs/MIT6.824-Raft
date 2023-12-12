@@ -289,7 +289,7 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(105, servers-1, false)
 
 	// re-connect
-	fmt.Printf("connnn")
+	//fmt.Printf("connnn")
 	cfg.connect((leader + 1) % servers)
 
 	// the full set of servers should preserve
@@ -1106,12 +1106,12 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 	defer cfg.cleanup()
 
 	cfg.begin(name)
-	fmt.Printf("[Test2D]: one command\n")
+	//fmt.Printf("[Test2D]: one command\n")
 	cfg.one(rand.Int(), servers, true)
 	leader1 := cfg.checkOneLeader()
 
 	for i := 0; i < iters; i++ {
-		fmt.Printf("[Test2D]: iteration %v\n", i)
+		//fmt.Printf("[Test2D]: iteration %v\n", i)
 		victim := (leader1 + 1) % servers
 		sender := leader1
 		if i%3 == 1 {
@@ -1120,16 +1120,16 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if disconnect {
-			fmt.Printf("[Test2D]: disconnect Raft %v\n", victim)
+			//fmt.Printf("[Test2D]: disconnect Raft %v\n", victim)
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
-			fmt.Printf("[Test2D]: crash Raft %v\n", victim)
+			//fmt.Printf("[Test2D]: crash Raft %v\n", victim)
 			cfg.crash1(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
-		fmt.Printf("[Test2D]: send many command\n")
+		//fmt.Printf("[Test2D]: send many command\n")
 		// perhaps send enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
@@ -1141,10 +1141,10 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// make sure all followers have caught up, so that
 			// an InstallSnapshot RPC isn't required for
 			// TestSnapshotBasic2D().
-			fmt.Printf("[Test2D]: send one command to %v server\n", servers)
+			//fmt.Printf("[Test2D]: send one command to %v server\n", servers)
 			cfg.one(rand.Int(), servers, true)
 		} else {
-			fmt.Printf("[Test2D]: send one command to %v server (exclude one server)\n", servers-1)
+			//fmt.Printf("[Test2D]: send one command to %v server (exclude one server)\n", servers-1)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 
@@ -1152,7 +1152,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			cfg.t.Fatalf("Log size too large")
 		}
 		if disconnect {
-			fmt.Printf("[Test2D]: connect Raft %v\n", victim)
+			//fmt.Printf("[Test2D]: connect Raft %v\n", victim)
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
 			cfg.connect(victim)
@@ -1160,7 +1160,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
-			fmt.Printf("[Test2D]: start Raft %v\n", victim)
+			//fmt.Printf("[Test2D]: start Raft %v\n", victim)
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
