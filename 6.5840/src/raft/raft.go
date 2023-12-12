@@ -112,12 +112,14 @@ type Snapshot struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	var term int
+	var isleader bool
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	term := rf.currentTerm
-	isLeader := rf.state == Leader
+	term = rf.currentTerm
+	isleader = rf.state == Leader
+	rf.mu.Unlock()
 	// Your code here (2A).
-	return term, isLeader
+	return term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -130,8 +132,6 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -186,6 +186,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.snapshotLock = true
 	logger.Printf("[Snapshot]: Raft %v snapshot before lock", rf.me)
 	rf.mu.Lock()
+	logger.Printf("[Snapshot]: Raft %v before %v", rf.me, rf)
 	defer rf.mu.Unlock()
 	applyMsg := ApplyMsg{
 		CommandValid:  false,
@@ -694,7 +695,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) ApplyLog() {
 	for {
 		rf.mu.Lock()
-		defer rf.mu.Unlock()
 		//logger.Printf()("[ApplyLog]: Raft %v LastApplied %v CommitIndex %v %v %v", rf.me, rf.lastApplied, rf.commitIndex, rf.snapshotLock, rf.snapshotMsgApply)
 		if rf.commitIndex <= rf.lastApplied || rf.snapshotLock == true || rf.snapshotMsgApply == true {
 			rf.mu.Unlock()
