@@ -140,7 +140,9 @@ func (rf *Raft) persist() {
 	e.Encode(rf.snapshot)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
-	logger.Printf("[persist]: %v %v %v %v", rf.currentTerm, rf.votedFor, rf.log, rf.snapshot)
+	logger.Printf("[persist]: Raft %v %v %v %v %v", rf.me, rf.currentTerm, rf.votedFor, rf.log, rf.snapshot)
+	logger.Printf("[persist]: RaftState bytes %v", rf.persister.ReadRaftState())
+	logger.Printf("[persist]: Snapshot bytes %v", rf.persister.ReadSnapshot())
 }
 
 // restore previously persisted state.
@@ -162,6 +164,7 @@ func (rf *Raft) readPersist(data []byte) {
 		d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&snapshot) != nil {
 	} else {
 		logger.Printf("[ReadPersist]: Raft %v Persist %v %v %v %v", rf.me, currentTerm, votedFor, log, snapshot)
+		logger.Printf("[ReadPersist]: Raft %v Raft bytes %v", rf.me, rf.persister.ReadRaftState())
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
@@ -222,6 +225,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) ApplySnapshotMsg(applyMsg ApplyMsg, index int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.killed() {
+		return
+	}
 	rf.applyCh <- applyMsg
 	rf.snapshotLock = false
 	logger.Printf("[ApplySnapshotMsg]: rf %v", rf)
