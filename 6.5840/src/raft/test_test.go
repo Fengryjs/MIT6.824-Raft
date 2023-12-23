@@ -266,7 +266,6 @@ func TestLeaderFailure2B(t *testing.T) {
 
 // test that a follower participates after
 // disconnect and re-connect.
-// TODO
 func TestFailAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -313,6 +312,7 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
+	logger.Printf("[TestFailNoAgree2B]: disconnect %v %v %v", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
@@ -465,6 +465,7 @@ func TestRejoin2B(t *testing.T) {
 
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
+	logger.Printf("[TestRejoin2B]: disconnect %v", leader1)
 	cfg.disconnect(leader1)
 
 	// make old leader try to agree on some entries
@@ -477,14 +478,17 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
+	logger.Printf("[TestRejoin2B]: disconnect %v", leader2)
 	cfg.disconnect(leader2)
 
 	// old leader connected again
+	logger.Printf("[TestRejoin2B]: reconnect %v", leader1)
 	cfg.connect(leader1)
 
 	cfg.one(104, 2, true)
 
 	// all together now
+	logger.Printf("[TestRejoin2B]: reconnect %v", leader2)
 	cfg.connect(leader2)
 
 	cfg.one(105, servers, true)
@@ -729,34 +733,35 @@ func TestPersist22C(t *testing.T) {
 
 	index := 1
 	for iters := 0; iters < 5; iters++ {
+		logger.Printf("[TestPersist22C]: iter %v", iters)
 		cfg.one(10+index, servers, true)
 		index++
 
 		leader1 := cfg.checkOneLeader()
-
+		logger.Printf("[TestPersist22C]: disconnect Raft %v Raft %v", (leader1+1)%servers, (leader1+2)%servers)
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
 
 		cfg.one(10+index, servers-2, true)
 		index++
-
+		logger.Printf("[TestPersist22C]: disconnect left 3 server, disconnect all now")
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
-
+		logger.Printf("[TestPersist22C]: start and connect Raft %v Raft %v", (leader1+1)%servers, (leader1+2)%servers)
 		cfg.start1((leader1+1)%servers, cfg.applier)
 		cfg.start1((leader1+2)%servers, cfg.applier)
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
 
 		time.Sleep(RaftElectionTimeout)
-
+		logger.Printf("[TestPersist22C]: start and connect Raft %v", (leader1+3)%servers)
 		cfg.start1((leader1+3)%servers, cfg.applier)
 		cfg.connect((leader1 + 3) % servers)
 
 		cfg.one(10+index, servers-2, true)
 		index++
-
+		logger.Printf("[TestPersist22C]: reconnect Raft %v Raft %v", (leader1+4)%servers, (leader1+0)%servers)
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
 	}
@@ -800,7 +805,7 @@ func TestPersist32C(t *testing.T) {
 // iteration asks a leader, if there is one, to insert a command in the Raft
 // log.  If there is a leader, that leader will fail quickly with a high
 // probability (perhaps without committing the command), or crash after a while
-// with low probability (most likey committing the command).  If the number of
+// with low probability (most likely committing the command).  If the number of
 // alive servers isn't enough to form a majority, perhaps start a new server.
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
@@ -815,6 +820,7 @@ func TestFigure82C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		logger.Printf("[TestFigure82C]: iteration %v", iters)
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
@@ -834,6 +840,7 @@ func TestFigure82C(t *testing.T) {
 		}
 
 		if leader != -1 {
+			logger.Printf("[TestFigure82C]: crash %v", leader)
 			cfg.crash1(leader)
 			nup -= 1
 		}
@@ -841,20 +848,21 @@ func TestFigure82C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
+				logger.Printf("[TestFigure82C]: start and connect Raft %v", s)
 				cfg.start1(s, cfg.applier)
 				cfg.connect(s)
 				nup += 1
 			}
 		}
 	}
-
+	logger.Printf("[TestFigure82C]: start and connect all")
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
 		}
 	}
-
+	logger.Printf("[TestFigure82C]: one command")
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
@@ -900,6 +908,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		//logger.Printf("[TestFigureUnreliable2C]: iteration %v", iters)
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -920,6 +929,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			logger.Printf("[TestFigureUnreliable2C]: disconnect %v", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -927,18 +937,19 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
+				logger.Printf("[TestFigureUnreliable2C]: connect %v", s)
 				cfg.connect(s)
 				nup += 1
 			}
 		}
 	}
-
+	logger.Printf("[TestFigureUnreliable2C]: connect all")
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
 			cfg.connect(i)
 		}
 	}
-
+	logger.Printf("[TestFigureUnreliable2C]: one command")
 	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
