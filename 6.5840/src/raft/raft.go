@@ -561,7 +561,7 @@ func (rf *Raft) UpdateCommitIndex() {
 			}
 			rf.mu.Unlock()
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -615,7 +615,7 @@ func (rf *Raft) UpdateLog() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -628,7 +628,7 @@ func (rf *Raft) ApplyLog() {
 		//logger.Printf()("[ApplyLog]: Raft %v LastApplied %v CommitIndex %v %v %v", rf.me, rf.lastApplied, rf.commitIndex, rf.snapshotLock, rf.snapshotMsgApply)
 		if rf.commitIndex <= rf.lastApplied || rf.lastApplied < rf.snapshot.LastIncludedIndex {
 			rf.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 		applyMsg := ApplyMsg{
