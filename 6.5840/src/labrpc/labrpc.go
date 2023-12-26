@@ -49,7 +49,11 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.5840/labgob"
+import (
+	"6.5840/labgob"
+	"sort"
+	"strconv"
+)
 import "bytes"
 import "reflect"
 import "sync"
@@ -135,6 +139,7 @@ type Network struct {
 	done           chan struct{} // closed when Network is cleaned up
 	count          int32         // total RPC count, for statistics
 	bytes          int64         // total bytes send, for statistics
+	rpcCountsMap   map[string]int
 }
 
 func MakeNetwork() *Network {
@@ -146,12 +151,17 @@ func MakeNetwork() *Network {
 	rn.connections = map[interface{}](interface{}){}
 	rn.endCh = make(chan reqMsg)
 	rn.done = make(chan struct{})
-
+	rn.rpcCountsMap = make(map[string]int)
 	// single goroutine to handle all ClientEnd.Call()s
 	go func() {
 		for {
 			select {
 			case xreq := <-rn.endCh:
+				if count, ok := rn.rpcCountsMap[xreq.svcMeth]; ok {
+					rn.rpcCountsMap[xreq.svcMeth] = count + 1
+				} else {
+					rn.rpcCountsMap[xreq.svcMeth] = 1
+				}
 				atomic.AddInt32(&rn.count, 1)
 				atomic.AddInt64(&rn.bytes, int64(len(xreq.args)))
 				go rn.processReq(xreq)
@@ -508,4 +518,16 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 			methname, req.svcMeth, choices)
 		return replyMsg{false, nil}
 	}
+}
+
+func (rn *Network) GetRPCCountMap() string {
+	rpcCount := make([]string, 0, len(rn.rpcCountsMap))
+	for key, _ := range rn.rpcCountsMap {
+		rpcCount = append(rpcCount, key)
+	}
+	sort.Strings(rpcCount)
+	for i := 0; i < len(rpcCount); i++ {
+		rpcCount[i] = rpcCount[i] + " " + strconv.Itoa(rn.rpcCountsMap[rpcCount[i]])
+	}
+	return strings.Join(rpcCount, ", ")
 }

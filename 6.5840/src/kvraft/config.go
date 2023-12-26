@@ -421,5 +421,10 @@ func (cfg *config) end() {
 
 		fmt.Printf("  ... Passed --")
 		fmt.Printf("  %4.1f  %d %5d %4d\n", t, npeers, nrpc, ops)
+		//fmt.Printf(cfg.RPCCount() + "\n")
 	}
+}
+
+func (cfg *config) RPCCount() string {
+	return cfg.net.GetRPCCountMap()
 }
