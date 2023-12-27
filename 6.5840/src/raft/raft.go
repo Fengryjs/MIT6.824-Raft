@@ -82,7 +82,7 @@ type Raft struct {
 
 }
 
-var file = "RaftLog"
+var file = "RaftLog.txt"
 var f, _ = os.Create(file)
 var logger = log.New(f, "", log.Lmicroseconds)
 
@@ -245,8 +245,10 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.persist()
+	defer func() {
+		rf.persist()
+		rf.mu.Unlock()
+	}()
 	rfInitialTerm := rf.currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -290,7 +292,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.currentTerm = args.Term
 	logger.Printf("[RequestVoteRPC] %v Raft %v %v InitialTerm %v VotedFor %v Result %v", args, rf.me, rf.currentTerm, rfInitialTerm, rf.votedFor, reply.VoteGranted)
-	return
 }
 
 type AppendEntriesArgs struct {
@@ -311,8 +312,10 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.persist()
+	defer func() {
+		rf.persist()
+		rf.mu.Unlock()
+	}()
 	// If AppendEntries RPC received from new leader: convert to follower
 	// 1. Reply false if Term < currenTerm (§5.1)
 	if args.Term < rf.currentTerm {
@@ -326,7 +329,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = Follower
 		rf.ElectionTimer = time.Now().Add(RandomElectionTimeout())
 	}
-	logger.Printf("[AppendEntries]: Raft %v receive args %v\n", rf.me, args)
+	//logger.Printf("[AppendEntries]: Raft %v receive args %v\n", rf.me, args)
 	//logger.Printf("[AppendEntries]: Raft %v", rf)
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose Term matches prevLogTerm (§5.3)
@@ -807,7 +810,7 @@ func (rf *Raft) SendHeartBeat(i int) {
 		}
 		if ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply); ok {
 			rf.mu.Lock()
-			logger.Printf("[SendHeartBeat]: Raft %v return %v", i, reply)
+			//logger.Printf("[SendHeartBeat]: Raft %v return %v", i, reply)
 			if reply.Success {
 				rf.ElectionTimer = time.Now().Add(RandomElectionTimeout())
 				rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1

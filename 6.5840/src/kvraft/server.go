@@ -59,9 +59,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	_, _, isLeader := kv.rf.Start(command)
 	if isLeader {
+		key := [2]int{command.Clerk, command.RequestId}
 		kv.mu.Lock()
-		kv.waitCh[[2]int{command.Clerk, command.RequestId}] = make(chan raft.ApplyMsg)
-		kv.waitTimer[[2]int{command.Clerk, command.RequestId}] = time.NewTimer(time.Second)
+		kv.waitCh[key] = make(chan raft.ApplyMsg)
+		kv.waitTimer[key] = time.NewTimer(time.Second)
 		kv.mu.Unlock()
 		select {
 		case <-kv.waitCh[[2]int{command.Clerk, command.RequestId}]:
@@ -93,10 +94,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	_, _, isLeader := kv.rf.Start(command)
 	if isLeader {
+		key := [2]int{command.Clerk, command.RequestId}
 		kv.mu.Lock()
-		//logger.Printf("[KVPutAppend]: kv %v isLeader %v", kv.me, isLeader)
-		kv.waitCh[[2]int{command.Clerk, command.RequestId}] = make(chan raft.ApplyMsg)
-		kv.waitTimer[[2]int{command.Clerk, command.RequestId}] = time.NewTimer(time.Second)
+		kv.waitCh[key] = make(chan raft.ApplyMsg)
+		kv.waitTimer[key] = time.NewTimer(time.Second)
 		kv.mu.Unlock()
 		//logger.Printf("[KVPutAppend]: kv %v key %v value %v", kv.me, args.Key, kv.kvPair[args.Key])
 		select {
@@ -120,8 +121,9 @@ func (kv *KVServer) ApplyOperation() {
 				//logger.Printf("[ApplyOperation]: KV %v Receive %v", kv.me, msg.Command)
 				kv.mu.Lock()
 				op := msg.Command.(Op)
-				if kv.duplicateTable[[2]int{op.Clerk, op.RequestId}] == nil {
-					kv.duplicateTable[[2]int{op.Clerk, op.RequestId}] = &op
+				key := [2]int{op.Clerk, op.RequestId}
+				if kv.duplicateTable[key] == nil {
+					kv.duplicateTable[key] = &op
 					switch op.Option {
 					case "Get":
 					case "Put":
@@ -132,10 +134,11 @@ func (kv *KVServer) ApplyOperation() {
 						logger.Printf("[ApplyOp]: Wrong Operation Type")
 					}
 				}
-				key := [2]int{op.Clerk, op.RequestId}
 				if kv.waitCh[key] != nil && kv.waitTimer[key].Stop() == true {
-					kv.waitCh[key] <- msg
 					logger.Printf("[ApplyOperation]: KV %v Receive %v and go through waitCh", kv.me, msg.Command)
+					kv.mu.Unlock()
+					kv.waitCh[key] <- msg
+					continue
 				}
 				kv.mu.Unlock()
 
