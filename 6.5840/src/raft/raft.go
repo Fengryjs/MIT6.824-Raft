@@ -137,7 +137,7 @@ func (rf *Raft) GetState() (int, bool) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persist(snapshot []byte) {
 	// Your code here (2C).
 	// Example:
 	w := new(bytes.Buffer)
@@ -145,7 +145,12 @@ func (rf *Raft) persist() {
 	if e.Encode(rf.currentTerm) == nil && e.Encode(rf.votedFor) == nil &&
 		e.Encode(rf.log) == nil && e.Encode(rf.snapshot) == nil {
 		raftState := w.Bytes()
-		rf.persister.Save(raftState, rf.persister.ReadSnapshot())
+		if snapshot == nil {
+			rf.persister.Save(raftState, rf.persister.ReadSnapshot())
+		} else {
+			rf.persister.Save(raftState, snapshot)
+		}
+
 	}
 }
 
@@ -196,30 +201,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if rf.snapshot.LastIncludedIndex >= index {
 		return
 	}
-	applyMsg := ApplyMsg{
-		CommandValid:  false,
-		Command:       nil,
-		CommandIndex:  0,
-		SnapshotValid: true,
-		Snapshot:      snapshot,
-		SnapshotTerm:  0,
-		SnapshotIndex: index,
-	}
 	logIndex := 0
 	for rf.log[logIndex].CommandIndex != index {
 		logIndex++
 	}
-	applyMsg.SnapshotTerm = rf.log[logIndex].Term
-	rf.log = rf.log[logIndex+1:]
-	// Save
 	rf.snapshot = Snapshot{
-		LastIncludedIndex: applyMsg.SnapshotIndex,
-		LastIncludedTerm:  applyMsg.SnapshotTerm,
+		LastIncludedIndex: index,
+		LastIncludedTerm:  rf.log[logIndex].Term,
 		State:             nil,
 	}
+	rf.log = rf.log[logIndex+1:]
 	rf.lastApplied = max(rf.lastApplied, index) // 当调用snapshot后，crash的server被重启，需要将刷新lastApplied，
-	rf.persist()
-	rf.persister.Save(rf.persister.ReadRaftState(), snapshot)
+	rf.persist(snapshot)
 	//logger.Printf("[Snapshot]: %v %v", index, rf)
 }
 
@@ -246,7 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer func() {
-		rf.persist()
+		rf.persist(nil)
 		rf.mu.Unlock()
 	}()
 	rfInitialTerm := rf.currentTerm
@@ -313,7 +306,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer func() {
-		rf.persist()
+		rf.persist(nil)
 		rf.mu.Unlock()
 	}()
 	// If AppendEntries RPC received from new leader: convert to follower
@@ -416,65 +409,37 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
-	if reply.Term > args.Term {
+	if reply.Term > args.Term || rf.snapshot.LastIncludedIndex >= args.LastIncludedIndex {
+		rf.mu.Unlock()
 		return
 	}
 	rf.currentTerm = args.Term
 	rf.state = Follower
 	rf.ElectionTimer = time.Now().Add(RandomElectionTimeout())
 	// 5. Save snapshot file, discard any existing or partial snapshot with a smaller index
-	if rf.snapshot.LastIncludedIndex < args.LastIncludedIndex {
-		rf.snapshot.LastIncludedIndex = args.LastIncludedIndex
-		rf.snapshot.LastIncludedTerm = args.LastIncludedTerm
-		rf.persister.Save(rf.persister.ReadRaftState(), args.Data)
-	} else {
-		return
-	}
-	go rf.ApplySnapshotCommandMsg(args.Data)
-	// 6. If existing log entry has same index and term as snapshot’s
-	// last included entry, retain log entries following it and reply
-	index := 0
-	for index < len(rf.log) {
-		if rf.log[index].CommandIndex == args.LastIncludedIndex && rf.log[index].Term == args.LastIncludedTerm {
-			rf.log = rf.log[index+1:]
-			return
-		}
-		index = index + 1
-	}
+	rf.snapshot.LastIncludedIndex = args.LastIncludedIndex
+	rf.snapshot.LastIncludedTerm = args.LastIncludedTerm
+	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+	// 6. If existing log entry has same index and term as snapshot’s last included entry, retain log entries following it and reply
 	// 7. Discard the entire log
-	rf.log = make([]Log, 0)
-	logger.Printf("[InstallSnapshot]: Raft %v discard all log", rf.me)
-}
-func (rf *Raft) ApplySnapshotCommandMsg(snapshot []byte) {
-	data := bytes.NewBuffer(snapshot)
-	decoder := labgob.NewDecoder(data)
-	var lastIncludedIndex int
-	var xlog []interface{}
-	if decoder.Decode(&lastIncludedIndex) == nil && decoder.Decode(&xlog) == nil {
-		//logger.Printf()("[ApplySnapshotCommandMsg]: lastIndex %v xlog %v", lastIncludedIndex, xlog)
-		for {
-			rf.mu.Lock()
-			if rf.lastApplied < lastIncludedIndex {
-				rf.lastApplied = rf.lastApplied + 1
-				applyMsg := ApplyMsg{
-					CommandValid:  true,
-					Command:       xlog[rf.lastApplied],
-					CommandIndex:  rf.lastApplied,
-					SnapshotValid: false,
-					Snapshot:      nil,
-					SnapshotTerm:  0,
-					SnapshotIndex: 0,
-				}
-				logger.Printf("[InstallSnapshot]: Raft %v Apply Msg %v %v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
-				rf.mu.Unlock()
-				rf.applyCh <- applyMsg
-			} else {
-				rf.mu.Unlock()
-				return
-			}
+	for len(rf.log) > 0 {
+		removed := rf.log[0]
+		rf.log = rf.log[1:]
+		if removed.CommandIndex == args.LastIncludedIndex && removed.Term == args.LastIncludedTerm {
+			break
 		}
+	}
+	rf.persist(args.Data)
+	rf.mu.Unlock()
+	rf.applyCh <- ApplyMsg{
+		CommandValid:  false,
+		Command:       nil,
+		CommandIndex:  0,
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
 	}
 }
 func (rf *Raft) SendInstallSnapshot(server int) {
@@ -599,7 +564,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			CommandIndex: index,
 			Term:         rf.currentTerm,
 		})
-		rf.persist()
+		rf.persist(nil)
 		logger.Printf("[Start]: %v receive %v command %v ", rf.me, index, command)
 	}
 	rf.mu.Unlock()
@@ -647,6 +612,7 @@ func (rf *Raft) ApplyLog() {
 		rf.lastApplied = rf.lastApplied + 1
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -935,4 +901,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ApplyLog()
 
 	return rf
+}
+
+// func for lab3
+func (rf *Raft) GetRaftStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) GetSnapshotSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.SnapshotSize()
 }
