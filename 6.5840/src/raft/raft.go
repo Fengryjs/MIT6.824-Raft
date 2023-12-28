@@ -612,7 +612,6 @@ func (rf *Raft) ApplyLog() {
 		rf.lastApplied = rf.lastApplied + 1
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
