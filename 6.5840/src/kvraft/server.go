@@ -181,14 +181,8 @@ func (kv *KVServer) killed() bool {
 }
 
 func (kv *KVServer) ReadPersist(snapshot []byte) {
-	var data []byte
-	if snapshot == nil {
-		data = snapshot
-	} else {
-		data = kv.rf.GetSnapshot()
-	}
-	if data != nil {
-		w := bytes.NewBuffer(data)
+	if snapshot != nil && len(snapshot) > 0 {
+		w := bytes.NewBuffer(snapshot)
 		d := labgob.NewDecoder(w)
 		if d.Decode(&kv.kvPair) != nil || d.Decode(&kv.duplicateTable) != nil {
 			logger.Printf("[ReadPersist]: KV %v load persist error", kv.me)
@@ -223,7 +217,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvPair = make(map[string]string)
 	kv.duplicateTable = make(map[int]int)
-	kv.ReadPersist(nil)
+	kv.ReadPersist(kv.rf.GetSnapshot())
 	kv.waitCh = make(map[[2]int]chan raft.ApplyMsg)
 	kv.waitTimer = make(map[[2]int]*time.Timer)
 	// You may need initialization code here.
