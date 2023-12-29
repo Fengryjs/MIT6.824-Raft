@@ -201,16 +201,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if rf.snapshot.LastIncludedIndex >= index {
 		return
 	}
-	logIndex := 0
-	for rf.log[logIndex].CommandIndex != index {
-		logIndex++
-	}
+	logIndex := index - rf.snapshot.LastIncludedIndex
 	rf.snapshot = Snapshot{
 		LastIncludedIndex: index,
-		LastIncludedTerm:  rf.log[logIndex].Term,
+		LastIncludedTerm:  rf.log[logIndex-1].Term,
 		State:             nil,
 	}
-	rf.log = rf.log[logIndex+1:]
+	rf.log = rf.log[logIndex:]
 	rf.lastApplied = max(rf.lastApplied, index) // 当调用snapshot后，crash的server被重启，需要将刷新lastApplied，
 	rf.persist(snapshot)
 	//logger.Printf("[Snapshot]: %v %v", index, rf)
@@ -529,7 +526,7 @@ func (rf *Raft) UpdateCommitIndex() {
 			}
 			rf.mu.Unlock()
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
@@ -583,7 +580,7 @@ func (rf *Raft) UpdateLog() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
@@ -596,7 +593,7 @@ func (rf *Raft) ApplyLog() {
 		//logger.Printf()("[ApplyLog]: Raft %v LastApplied %v CommitIndex %v %v %v", rf.me, rf.lastApplied, rf.commitIndex, rf.snapshotLock, rf.snapshotMsgApply)
 		if rf.commitIndex <= rf.lastApplied || rf.lastApplied < rf.snapshot.LastIncludedIndex {
 			rf.mu.Unlock()
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 			continue
 		}
 		applyMsg := ApplyMsg{
@@ -909,8 +906,8 @@ func (rf *Raft) GetRaftStateSize() int {
 	return rf.persister.RaftStateSize()
 }
 
-func (rf *Raft) GetSnapshotSize() int {
+func (rf *Raft) GetSnapshot() []byte {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.persister.SnapshotSize()
+	return rf.persister.ReadSnapshot()
 }

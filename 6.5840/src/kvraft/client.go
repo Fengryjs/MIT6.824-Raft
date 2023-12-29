@@ -37,6 +37,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	ck.leader = 0
 	ck.id = clerkId
+	ck.requestId = 1
 	clerkId += 1
 	// init leader 0
 	// You'll have to add code here.
@@ -69,7 +70,7 @@ func (ck *Clerk) Get(key string) string {
 		//logger.Printf("[ClerkGet]: Clerk call GetRPC to server %v", ck.leader)
 		if ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply); ok {
 			if reply.Err == OK {
-				logger.Printf("[ClerkGet]: Clerk %v Request %v reply key %v value %v", ck.id, ck.requestId, args.Key, reply.Value)
+				logger.Printf("[ClerkGet]: Clerk %v Request %v reply key %v value %v", args.Clerk, args.Request, args.Key, reply.Value)
 				return reply.Value
 			} else if reply.Err == ErrWrongLeader {
 				ck.leader = (ck.leader + 1) % len(ck.servers)
@@ -108,7 +109,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		//logger.Printf("[ClerkPutAppend]: Clerk try to call KVServer %v", ck.leader)
 		if ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply); ok {
 			if reply.Err == OK {
-				logger.Printf("[ClerkPutAppend]: Clerk %v Request %v reply %v", ck.id, ck.requestId, reply)
+				logger.Printf("[ClerkPutAppend]: Clerk %v Request %v reply %v", args.Clerk, args.Request, reply)
 				return
 			} else if reply.Err == ErrWrongLeader {
 				ck.leader = (ck.leader + 1) % len(ck.servers)

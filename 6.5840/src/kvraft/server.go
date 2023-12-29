@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -36,16 +37,11 @@ type KVServer struct {
 	rf             *raft.Raft
 	applyCh        chan raft.ApplyMsg
 	dead           int32 // set by Kill()
-	getCh          chan raft.ApplyMsg
-	putAppendCh    chan raft.ApplyMsg
-	maxraftstate   int // snapshot if log grows this big
+	maxraftstate   int   // snapshot if log grows this big
 	kvPair         map[string]string
-	waiting        bool
 	waitCh         map[[2]int]chan raft.ApplyMsg
 	waitTimer      map[[2]int]*time.Timer
-	timer          *time.Timer
-	duplicateTable map[[2]int]*Op
-
+	duplicateTable map[int]int
 	// Your definitions here.
 }
 
@@ -59,22 +55,24 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	_, _, isLeader := kv.rf.Start(command)
 	if isLeader {
-		key := [2]int{command.Clerk, command.RequestId}
 		kv.mu.Lock()
-		kv.waitCh[key] = make(chan raft.ApplyMsg)
-		kv.waitTimer[key] = time.NewTimer(time.Second)
+		waitCh := make(chan raft.ApplyMsg)
+		waitTimer := time.NewTimer(time.Second)
+		key := [2]int{command.Clerk, command.RequestId}
+		kv.waitCh[key] = waitCh
+		kv.waitTimer[key] = waitTimer
 		kv.mu.Unlock()
 		select {
-		case <-kv.waitCh[[2]int{command.Clerk, command.RequestId}]:
+		case <-waitCh:
 			kv.mu.Lock()
 			reply.Value = kv.kvPair[args.Key]
 			kv.mu.Unlock()
 			//logger.Printf("[KVGet]: server %v return key %v reply %v", kv.me, args.Key, kv.kvPair[args.Key])
 			reply.Err = OK
-		case <-kv.waitTimer[[2]int{command.Clerk, command.RequestId}].C:
+		case <-waitTimer.C:
 			logger.Printf("[KVGet]: Server %v Client %v Request %v timeout limit exceeds", kv.me, command.Clerk, command.RequestId)
-			delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-			reply.Err = ErrNoKey
+			//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
+			reply.Err = ErrWrongLeader
 		}
 		//logger.Printf("[KVGet]: %v", msg)
 	} else {
@@ -94,20 +92,22 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	_, _, isLeader := kv.rf.Start(command)
 	if isLeader {
-		key := [2]int{command.Clerk, command.RequestId}
 		kv.mu.Lock()
-		kv.waitCh[key] = make(chan raft.ApplyMsg)
-		kv.waitTimer[key] = time.NewTimer(time.Second)
+		waitCh := make(chan raft.ApplyMsg)
+		waitTimer := time.NewTimer(time.Second)
+		key := [2]int{command.Clerk, command.RequestId}
+		kv.waitCh[key] = waitCh
+		kv.waitTimer[key] = waitTimer
 		kv.mu.Unlock()
 		//logger.Printf("[KVPutAppend]: kv %v key %v value %v", kv.me, args.Key, kv.kvPair[args.Key])
 		select {
-		case <-kv.waitCh[[2]int{command.Clerk, command.RequestId}]:
+		case <-waitCh:
 			reply.Err = OK
 			//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-		case <-kv.waitTimer[[2]int{command.Clerk, command.RequestId}].C:
+		case <-waitTimer.C:
 			logger.Printf("[KVPutAppend]: Server %v Client %v Request %v timeout", kv.me, command.Clerk, command.RequestId)
 			//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-			reply.Err = ErrNoKey
+			reply.Err = ErrWrongLeader
 		}
 	} else {
 		reply.Err = ErrWrongLeader
@@ -117,13 +117,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) ApplyOperation() {
 	for kv.killed() == false {
 		for msg := range kv.applyCh {
+			kv.mu.Lock()
 			if msg.CommandValid {
 				//logger.Printf("[ApplyOperation]: KV %v Receive %v", kv.me, msg.Command)
-				kv.mu.Lock()
 				op := msg.Command.(Op)
 				key := [2]int{op.Clerk, op.RequestId}
-				if kv.duplicateTable[key] == nil {
-					kv.duplicateTable[key] = &op
+				if kv.duplicateTable[op.Clerk] < op.RequestId {
+					kv.duplicateTable[op.Clerk] = op.RequestId
+					//kv.duplicateTable[key] = &op
 					switch op.Option {
 					case "Get":
 					case "Put":
@@ -134,14 +135,27 @@ func (kv *KVServer) ApplyOperation() {
 						logger.Printf("[ApplyOp]: Wrong Operation Type")
 					}
 				}
+				// Manual Chosen Number: Snapshot Interval
+				if kv.maxraftstate != -1 && msg.CommandIndex%100 == 0 {
+					logger.Printf("[KVSnapshot]: KV %v snap index %v currentSize %v\ncurrent state %v", kv.me, msg.CommandIndex, kv.rf.GetRaftStateSize(), kv.kvPair)
+					b := new(bytes.Buffer)
+					e := labgob.NewEncoder(b)
+					if e.Encode(kv.kvPair) == nil && e.Encode(kv.duplicateTable) == nil {
+						kv.rf.Snapshot(msg.CommandIndex, b.Bytes())
+					}
+				}
 				if kv.waitCh[key] != nil && kv.waitTimer[key].Stop() == true {
+					waitCh := kv.waitCh[key]
 					logger.Printf("[ApplyOperation]: KV %v Receive %v and go through waitCh", kv.me, msg.Command)
 					kv.mu.Unlock()
-					kv.waitCh[key] <- msg
+					waitCh <- msg
 					continue
 				}
 				kv.mu.Unlock()
-
+			} else if msg.SnapshotValid {
+				kv.ReadPersist(msg.Snapshot)
+				logger.Printf("[KVSnapshot]: KV %v read snapshot %v", kv.me, kv.kvPair)
+				kv.mu.Unlock()
 			}
 		}
 	}
@@ -164,6 +178,22 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) ReadPersist(snapshot []byte) {
+	var data []byte
+	if snapshot == nil {
+		data = snapshot
+	} else {
+		data = kv.rf.GetSnapshot()
+	}
+	if data != nil {
+		w := bytes.NewBuffer(data)
+		d := labgob.NewDecoder(w)
+		if d.Decode(&kv.kvPair) != nil || d.Decode(&kv.duplicateTable) != nil {
+			logger.Printf("[ReadPersist]: KV %v load persist error", kv.me)
+		}
+	}
 }
 
 // servers[] contains the ports of the set of
@@ -190,11 +220,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.getCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvPair = make(map[string]string)
+	kv.duplicateTable = make(map[int]int)
+	kv.ReadPersist(nil)
 	kv.waitCh = make(map[[2]int]chan raft.ApplyMsg)
-	kv.duplicateTable = make(map[[2]int]*Op)
 	kv.waitTimer = make(map[[2]int]*time.Timer)
 	// You may need initialization code here.
 	go kv.ApplyOperation()

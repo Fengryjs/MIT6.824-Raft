@@ -10,3 +10,4 @@ mrtmp.*
 /main/mrsequential
 /main/mrworker
 /raft/RaftLog*
+/kvraft/*.txt
