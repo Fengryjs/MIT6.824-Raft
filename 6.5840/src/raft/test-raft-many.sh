@@ -19,7 +19,7 @@ do
   echo "Running test $((i+1))..."
   $command
   if [ $? -ne 0 ]; then
-    echo "Test failed, exiting loop."
+    echo "Test $((i+1))failed, exiting loop."
     exit 1
   fi
 done
