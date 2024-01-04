@@ -23,4 +23,4 @@ do
     exit 1
   fi
 done
-echo "... Pass all $((i+1)) test ..."
+echo "... Pass all $((i)) test ..."
