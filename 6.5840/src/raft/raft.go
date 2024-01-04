@@ -73,6 +73,8 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
+	replicateMap map[int]ReplicateStamp
+
 	ElectionTimer time.Time
 
 	snapshot Snapshot
@@ -87,6 +89,11 @@ var f, _ = os.Create(file)
 var logger = log.New(f, "", log.Lmicroseconds)
 
 type ServerState string
+
+type ReplicateStamp struct {
+	index     int
+	timestamp time.Time
+}
 
 // The paper's Section 5.2 mentions election timeouts in the range of 150 to 300 milliseconds.
 // Such a range only makes sense if the leader sends heartbeats considerably more often
@@ -283,6 +290,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.currentTerm = args.Term
 	logger.Printf("[RequestVoteRPC] %v Raft %v %v InitialTerm %v VotedFor %v Result %v", args, rf.me, rf.currentTerm, rfInitialTerm, rf.votedFor, reply.VoteGranted)
 }
+func (rf *Raft) SendRequestVote(args RequestVoteArgs, server int, voteCh chan bool) {
+	reply := RequestVoteReply{
+		Term:        0,
+		VoteGranted: false,
+	}
+	if ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply); ok {
+		if reply.VoteGranted {
+			voteCh <- true
+		} else {
+			voteCh <- false
+			rf.mu.Lock()
+			if reply.Term > rf.currentTerm {
+				rf.state = Follower
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+			}
+			rf.mu.Unlock()
+		}
+	} else {
+		voteCh <- false
+	}
+}
 
 type AppendEntriesArgs struct {
 	Term         int
@@ -407,7 +436,7 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
-	if reply.Term > args.Term || rf.snapshot.LastIncludedIndex >= args.LastIncludedIndex {
+	if reply.Term > args.Term || rf.lastApplied >= args.LastIncludedIndex {
 		rf.mu.Unlock()
 		return
 	}
@@ -417,7 +446,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// 5. Save snapshot file, discard any existing or partial snapshot with a smaller index
 	rf.snapshot.LastIncludedIndex = args.LastIncludedIndex
 	rf.snapshot.LastIncludedTerm = args.LastIncludedTerm
-	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+	rf.lastApplied = args.LastIncludedIndex
 	// 6. If existing log entry has same index and term as snapshot’s last included entry, retain log entries following it and reply
 	// 7. Discard the entire log
 	for len(rf.log) > 0 {
@@ -428,7 +457,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 	}
 	rf.persist(args.Data)
-	rf.mu.Unlock()
 	rf.applyCh <- ApplyMsg{
 		CommandValid:  false,
 		Command:       nil,
@@ -438,6 +466,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
+	rf.mu.Unlock()
 }
 func (rf *Raft) SendInstallSnapshot(server int) {
 	rf.mu.Lock()
@@ -500,11 +529,6 @@ func (rf *Raft) SendInstallSnapshot(server int) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
 func (rf *Raft) UpdateCommitIndex() {
 	for rf.killed() == false {
 		rf.mu.Lock()
@@ -576,7 +600,14 @@ func (rf *Raft) UpdateLog() {
 		}
 		for server := 0; server < len(rf.peers); server++ {
 			if server != rf.me && rf.nextIndex[server] < len(rf.log)+rf.snapshot.LastIncludedIndex+1 {
-				go rf.SendHeartBeat(server)
+				if t, err := rf.replicateMap[server]; !err || t.timestamp.Before(time.Now()) || t.index < len(rf.log)+rf.snapshot.LastIncludedIndex+1 {
+					rf.replicateMap[server] = ReplicateStamp{
+						index:     len(rf.log) + rf.snapshot.LastIncludedIndex + 1,
+						timestamp: time.Now().Add(10 * time.Millisecond),
+					}
+					go rf.SendHeartBeat(server)
+				}
+
 			}
 		}
 		rf.mu.Unlock()
@@ -630,17 +661,42 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
+func (rf *Raft) WinElection() {
+	rf.mu.Lock()
+	logger.Printf("Raft %v become Leader With Term %v", rf.me, rf.currentTerm)
+	rf.state = Leader
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.replicateMap = make(map[int]ReplicateStamp)
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = len(rf.log) + rf.snapshot.LastIncludedIndex + 1
+		rf.matchIndex[i] = 0
+	}
+	rf.ElectionTimer = time.Now().Add(RandomElectionTimeout())
+	rf.mu.Unlock()
+	go rf.BroadcastHeartBeat()
+	go rf.UpdateCommitIndex()
+	go rf.UpdateLog()
+}
+func (rf *Raft) FailElection() {
+	rf.mu.Lock()
+	if rf.state == Candidate {
+		rf.currentTerm -= 1
+		rf.state = Follower
+		rf.votedFor = -1
+		ms := 50 + rand.Int63()%300
+		rf.ElectionTimer = time.Now().Add(time.Duration(ms) * time.Millisecond)
+		logger.Printf("[RaftElection]: Raft %v Not enough vote return Follower current Term %v", rf.me, rf.currentTerm)
+	}
+	rf.mu.Unlock()
+	// election completed without getting enough votes, break
+}
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.state = Candidate
-	// On conversion to candidate, start election:
-	// Increment currentTerm
 	rf.currentTerm = rf.currentTerm + 1
-	// Vote for self
 	rf.votedFor = rf.me
-	// Reset election timer
-	// Send RequestVote RPCs to all other servers
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
@@ -657,85 +713,32 @@ func (rf *Raft) startElection() {
 	logger.Printf("%v begin switch to Candidate with term %v", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	voteChan := make(chan bool, len(rf.peers)-1)
+	timer := time.NewTimer(50 * time.Millisecond)
 	for i := 0; i < len(rf.peers); i++ {
-		rf.mu.Lock()
-		state := rf.state
-		rf.mu.Unlock()
-		if state != Candidate {
-			break
-		}
 		if i != rf.me {
-			go func(i int) {
-				reply := RequestVoteReply{
-					Term:        0,
-					VoteGranted: false,
-				}
-				if ok := rf.peers[i].Call("Raft.RequestVote", &args, &reply); ok {
-					if reply.VoteGranted {
-						voteChan <- true
-					} else {
-						voteChan <- false
-						rf.mu.Lock()
-						if reply.Term > rf.currentTerm {
-							rf.state = Follower
-							rf.currentTerm = reply.Term
-							rf.votedFor = -1
-							rf.mu.Unlock()
-							return
-						}
-						rf.mu.Unlock()
-					}
-				} else {
-					voteChan <- false
-					return
-				}
-			}(i)
+			go rf.SendRequestVote(args, i, voteChan)
 		}
 	}
 	voteCnt := 1
 	voteGrantedCnt := 1
-	for voteGranted := range voteChan {
-		rf.mu.Lock()
-		state := rf.state
-		rf.mu.Unlock()
-		if state != Candidate {
-			break
-		}
-		if voteGranted {
-			voteGrantedCnt++
-		}
-		if voteGrantedCnt > len(rf.peers)/2 {
-			// gain over a half votes, switch to leader
-			rf.mu.Lock()
-			logger.Printf("Raft %v become Leader With Term %v", rf.me, rf.currentTerm)
-			rf.state = Leader
-			rf.nextIndex = make([]int, len(rf.peers))
-			rf.matchIndex = make([]int, len(rf.peers))
-			for i := 0; i < len(rf.peers); i++ {
-				rf.nextIndex[i] = len(rf.log) + rf.snapshot.LastIncludedIndex + 1
-				rf.matchIndex[i] = 0
+	for {
+		select {
+		case voteGrant := <-voteChan:
+			if voteGrant {
+				voteGrantedCnt++
+				voteCnt++
+				if voteGrantedCnt > len(rf.peers)/2 {
+					rf.WinElection()
+					return
+				}
+				if voteCnt == len(rf.peers) {
+					rf.FailElection()
+					return
+				}
 			}
-			rf.ElectionTimer = time.Now().Add(RandomElectionTimeout())
-			rf.mu.Unlock()
-			go rf.BroadcastHeartBeat()
-			go rf.UpdateCommitIndex()
-			go rf.UpdateLog()
-			break
-		}
-		voteCnt++
-		if voteCnt == len(rf.peers) {
-			rf.mu.Lock()
-			if rf.state == Candidate {
-				rf.currentTerm -= 1
-			}
-			rf.state = Follower
-			rf.votedFor = -1
-			ms := 50 + rand.Int63()%300
-			rf.ElectionTimer = time.Now().Add(time.Duration(ms) * time.Millisecond)
-			logger.Printf("[RaftElection]: Raft %v Not enough vote return Follower current Term %v", rf.me, rf.currentTerm)
-			rf.mu.Unlock()
-			// election completed without getting enough votes, break
-			break
+		case <-timer.C:
+			rf.FailElection()
+			return
 		}
 	}
 }
@@ -840,13 +843,6 @@ func (rf *Raft) ticker() {
 			ms := 50 + rand.Int63()%300
 			rf.ElectionTimer = time.Now().Add(time.Duration(ms) * time.Millisecond)
 			go rf.startElection()
-		} else if rf.state == Candidate && rf.ElectionTimer.Before(time.Now()) {
-			// 选举时间过长，超过了ElectionTimeout，仍未结束（存在Error的RPC调用）
-			rf.state = Follower
-			rf.currentTerm -= 1
-			rf.votedFor = -1
-			rf.ElectionTimer = time.Now().Add(RandomElectionTimeout())
-			logger.Printf("[Raft]: Raft %v switch candidate to follower, currentTerm %v", rf.me, rf.currentTerm)
 		} else if rf.state == Leader && rf.ElectionTimer.Before(time.Now()) {
 			rf.state = Follower
 			rf.votedFor = -1
