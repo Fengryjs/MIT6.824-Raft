@@ -204,6 +204,7 @@ func TestBasic(t *testing.T) {
 	for i := 0; i < npara; i++ {
 		<-ch
 	}
+	fmt.Printf("%v\n", gids)
 	check(t, gids, ck)
 
 	fmt.Printf("  ... Passed\n")

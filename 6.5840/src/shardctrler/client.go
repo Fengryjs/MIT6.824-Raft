@@ -4,14 +4,26 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"fmt"
+	"log"
+	"os"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
 
+var shardCtrlerLog = "ShardCtrlerLog.txt"
+var f, _ = os.Create(shardCtrlerLog)
+var logger = log.New(f, "", log.Lmicroseconds)
+var ClerkId = 0
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	id      int
+	request int
 }
 
 func nrand() int64 {
@@ -25,13 +37,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ClerkId += 1
+	ck.id = ClerkId
+	ck.request = 1
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
+	fmt.Printf("[Clerk]: query %v\n", num)
+	args := &QueryArgs{
+		Num:     num,
+		Clerk:   ck.id,
+		Request: ck.request,
+	}
+	ck.request += 1
 	// Your code here.
-	args.Num = num
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -46,9 +66,14 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	fmt.Printf("[Clerk]: join %v\n", servers)
+	args := &JoinArgs{
+		Servers: servers,
+		Clerk:   ck.id,
+		Request: ck.request,
+	}
+	ck.request += 1
 	// Your code here.
-	args.Servers = servers
 
 	for {
 		// try each known server.
@@ -64,9 +89,14 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	fmt.Printf("[Clerk]: leave %v\n", gids)
+	args := &LeaveArgs{
+		GIDs:    gids,
+		Clerk:   ck.id,
+		Request: ck.request,
+	}
+	ck.request += 1
 	// Your code here.
-	args.GIDs = gids
 
 	for {
 		// try each known server.
@@ -82,10 +112,15 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	fmt.Printf("[Clerk]: move shard %v gid %v\n", shard, gid)
+	args := &MoveArgs{
+		Shard:   shard,
+		GID:     gid,
+		Clerk:   ck.id,
+		Request: ck.request,
+	}
+	ck.request += 1
 	// Your code here.
-	args.Shard = shard
-	args.GID = gid
 
 	for {
 		// try each known server.
