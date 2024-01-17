@@ -44,7 +44,6 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
-	fmt.Printf("[Clerk]: query %v\n", num)
 	args := &QueryArgs{
 		Num:     num,
 		Clerk:   ck.id,
@@ -58,6 +57,7 @@ func (ck *Clerk) Query(num int) Config {
 			var reply QueryReply
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
+				fmt.Printf("[Clerk]: query %v reply %v\n", num, reply.Config)
 				return reply.Config
 			}
 		}

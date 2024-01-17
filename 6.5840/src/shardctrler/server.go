@@ -2,7 +2,6 @@ package shardctrler
 
 import (
 	"6.5840/raft"
-	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -99,7 +98,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		} else {
 			reply.Config = sc.configs[args.Num]
 		}
-		fmt.Printf("[ShardCtrler]: Query %v reply %v\n", args.Num, reply)
+		//fmt.Printf("[ShardCtrler]: Query %v reply %v\n", args.Num, reply)
 		sc.mu.Unlock()
 	} else {
 		reply.WrongLeader = true
@@ -125,7 +124,7 @@ func (sc *ShardCtrler) WaitConsensus(Clerk int, RequestId int) bool {
 }
 
 func (sc *ShardCtrler) JoinConfig(args JoinArgs) {
-	fmt.Printf("[ShardCtrler]: join %v\n", args)
+	//fmt.Printf("[ShardCtrler]: join %v\n", args)
 	curConfig := sc.configs[len(sc.configs)-1]
 	var cfg = Config{
 		Num:    curConfig.Num + 1,
@@ -144,10 +143,10 @@ func (sc *ShardCtrler) JoinConfig(args JoinArgs) {
 	}
 	sc.ReBalanceShards(&cfg)
 	sc.configs = append(sc.configs, cfg)
-	fmt.Printf("[ShardCtrler]: Config After Join %v \n", cfg)
+	//fmt.Printf("[ShardCtrler]: Config After Join %v \n", cfg)
 }
 func (sc *ShardCtrler) LeaveConfig(args LeaveArgs) {
-	fmt.Printf("[ShardCtrler]: Leave %v\n", args)
+	//fmt.Printf("[ShardCtrler]: Leave %v\n", args)
 	lastCfg := sc.configs[len(sc.configs)-1]
 	cfg := Config{
 		Num:    lastCfg.Num + 1,
@@ -165,10 +164,10 @@ func (sc *ShardCtrler) LeaveConfig(args LeaveArgs) {
 	}
 	sc.ReBalanceShards(&cfg)
 	sc.configs = append(sc.configs, cfg)
-	fmt.Printf("[ShardCtrler]: Config After Leave %v\n", cfg)
+	//fmt.Printf("[ShardCtrler]: Config After Leave %v\n", cfg)
 }
 func (sc *ShardCtrler) MoveConfig(args MoveArgs) {
-	fmt.Printf("[ShardCtrler]: Move %v\n", args)
+	//fmt.Printf("[ShardCtrler]: Move %v\n", args)
 	lastCfg := sc.configs[len(sc.configs)-1]
 	cfg := Config{
 		Num:    lastCfg.Num + 1,
@@ -190,7 +189,7 @@ func (sc *ShardCtrler) MoveConfig(args MoveArgs) {
 		}
 	}
 	sc.configs = append(sc.configs, cfg)
-	fmt.Printf("[ShardCtrler]: Config After Move %v\n", cfg)
+	//fmt.Printf("[ShardCtrler]: Config After Move %v\n", cfg)
 }
 func (sc *ShardCtrler) MaxMinUse(keys []int, Shards [10]int, Groups map[int][]string) (int, int, int, map[int]int) {
 	useful := 0
