@@ -21,11 +21,13 @@ type Err string
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
-	Key     string
-	Value   string
-	Clerk   int
-	Request int
-	Op      string // "Put" or "Append"
+	Key       string
+	Value     string
+	Clerk     int
+	Request   int
+	Shard     int
+	ConfigNum int
+	Op        string // "Put" or "Append"
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
@@ -36,13 +38,37 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key     string
-	Clerk   int
-	Request int
+	Key       string
+	Clerk     int
+	Request   int
+	Shard     int
+	ConfigNum int
 	// You'll have to add definitions here.
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type TakeOverShardArgs struct {
+	Shard     int
+	Data      map[int]map[string]string
+	Group     int
+	ConfigNum int
+}
+
+type TakeOverShardReply struct {
+	Err Err
+}
+
+type AskForShardArgs struct {
+	Shard     int
+	ConfigNum int
+}
+
+type AskForShardReply struct {
+	Err            string
+	Data           map[string]string
+	DuplicateTable map[int]int
 }

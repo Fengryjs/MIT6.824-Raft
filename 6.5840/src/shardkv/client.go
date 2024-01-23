@@ -62,6 +62,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
+	ck.id = clerkId
 	clerkId += 1
 	ck.request = 1
 	// You'll have to add code here.
@@ -80,7 +81,10 @@ func (ck *Clerk) Get(key string) string {
 	}
 	ck.request += 1
 	for {
+		logger.Printf("[ClerkGet]: OpKey %v Get %v", [2]int{args.Clerk, args.Request}, key)
 		shard := key2shard(key)
+		args.Shard = shard
+		args.ConfigNum = ck.config.Num
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
@@ -101,8 +105,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
-	return ""
 }
 
 // shared by Put and Append.
@@ -117,7 +119,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	ck.request += 1
 	for {
+		logger.Printf("[ClerkPutAppend]: OpKey %v %v Key %v Value %v", [2]int{args.Clerk, args.Request}, op, key, value)
 		shard := key2shard(key)
+		args.Shard = shard
+		args.ConfigNum = ck.config.Num
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
@@ -134,7 +139,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
+		// ask controller for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
 }
