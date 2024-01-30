@@ -46,15 +46,13 @@ type ShardKV struct {
 	dead int32
 
 	kvPair         map[int]map[string]string
-	waitCh         map[[2]int]chan bool
-	waitTimer      map[[2]int]*time.Timer
+	msgReceiver    map[[2]int]*Receiver
 	duplicateTable map[int]int
 
-	configChangeCh    map[int]chan bool
-	configChangeTimer map[int]*time.Timer
+	configRc map[int]*Receiver
 
-	migratingCh       map[[2]int]chan bool
-	migrationTimer    map[[2]int]*time.Timer
+	migrateRc map[[2]int]*Receiver
+
 	migrationDupTable map[int]int
 
 	shardMigrationWaitCh map[int]int
@@ -64,10 +62,19 @@ type ShardKV struct {
 	// Your definitions here.
 }
 
+type Receiver struct {
+	// TODO
+	ch    chan bool
+	timer *time.Timer
+}
+
+const DefaultTimeout = 1 * time.Second
+
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	//fmt.Printf("[Get]: %v\n", kv.shardMigrationWaitCh)
 	//fmt.Printf("[Get]: %v\n", kv.curConfig)
 	kv.mu.Lock()
+	reply.Err = ErrWrongLeader
 	if kv.curConfig.Shards[args.Shard] == kv.gid && kv.shardMigrationWaitCh[args.Shard] == args.ConfigNum {
 		kv.mu.Unlock()
 		command := Op{
@@ -81,33 +88,30 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		_, _, isLeader := kv.rf.Start(command)
 		if isLeader {
 			kv.mu.Lock()
-			waitCh := make(chan bool)
-			waitTimer := time.NewTimer(time.Second)
+			rc := Receiver{
+				ch:    make(chan bool),
+				timer: time.NewTimer(DefaultTimeout),
+			}
 			key := [2]int{command.Clerk, command.RequestId}
-			kv.waitCh[key] = waitCh
-			kv.waitTimer[key] = waitTimer
+			kv.msgReceiver[key] = &rc
 			kv.mu.Unlock()
 			select {
-			case <-waitCh:
-				kv.mu.Lock()
-				fmt.Printf("[ShardKV]: OpKey %v Config %v Gid %v Get Shard %v key %v value %v\n",
-					[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Shard, args.Key, kv.kvPair[args.Shard][args.Key])
-				reply.Value = kv.kvPair[args.Shard][args.Key]
-				kv.mu.Unlock()
-				//logger.Printf("[KVGet]: server %v return key %v reply %v", kv.me, args.Key, kv.kvPair[args.Key])
-				reply.Err = OK
-			case <-waitTimer.C:
-				logger.Printf("[KVGet]: Server %v Client %v Request %v timeout limit exceeds", kv.me, command.Clerk, command.RequestId)
-				//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-				reply.Err = ErrWrongLeader
+			case msg := <-rc.ch:
+				if msg {
+					kv.mu.Lock()
+					fmt.Printf("[ShardKV]: OpKey %v Config %v Gid %v Get Shard %v key %v value %v\n",
+						[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Shard, args.Key, kv.kvPair[args.Shard][args.Key])
+					reply.Value = kv.kvPair[args.Shard][args.Key]
+					kv.mu.Unlock()
+					//logger.Printf("[KVGet]: server %v return key %v reply %v", kv.me, args.Key, kv.kvPair[args.Key])
+					reply.Err = OK
+				}
+			case <-rc.timer.C:
+
 			}
-			//logger.Printf("[KVGet]: %v", msg)
-		} else {
-			reply.Err = ErrWrongLeader
 		}
 	} else {
 		fmt.Printf("[ErrorGet]: Args.ConfigNum %v Config %v Shard,Key {%v, %v} MigratingWaiting %v\n", args.ConfigNum, kv.curConfig.Num, args.Shard, args.Key, kv.shardMigrationWaitCh[args.Shard])
-		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 	}
 }
@@ -115,6 +119,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// PutAppend 操作如果在 raft 层实现共识时，config已经更换了，应该更换 group
 	kv.mu.Lock()
+	reply.Err = ErrWrongLeader
 	if kv.curConfig.Shards[args.Shard] == kv.gid && kv.shardMigrationWaitCh[args.Shard] == args.ConfigNum {
 		command := Op{
 			Option:    args.Op,
@@ -129,185 +134,107 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		_, _, isLeader := kv.rf.Start(command)
 		if isLeader {
 			kv.mu.Lock()
-			waitCh := make(chan bool)
-			waitTimer := time.NewTimer(time.Second)
 			key := [2]int{command.Clerk, command.RequestId}
-			kv.waitCh[key] = waitCh
-			kv.waitTimer[key] = waitTimer
-			kv.mu.Unlock()
-			//logger.Printf("[KVPutAppend]: kv %v key %v value %v", kv.me, args.Key, kv.kvPair[args.Key])
-			select {
-			case <-waitCh:
-				fmt.Printf("[ShardKV]: OpKey %v Config %v Gid %v %v Shard %v key %v value %v\n",
-					[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Op, args.Shard, args.Key, args.Value)
-				reply.Err = OK
-				//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-			case <-waitTimer.C:
-				logger.Printf("[KVPutAppend]: Server %v Client %v Request %v timeout", kv.me, command.Clerk, command.RequestId)
-				//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-				reply.Err = ErrWrongLeader
+			rc := Receiver{
+				ch:    make(chan bool),
+				timer: time.NewTimer(DefaultTimeout),
 			}
-		} else {
-			reply.Err = ErrWrongLeader
+			kv.msgReceiver[key] = &rc
+			kv.mu.Unlock()
+			select {
+			case msg := <-rc.ch:
+				if msg {
+					fmt.Printf("[ShardKV]: OpKey %v Config %v Gid %v %v Shard %v key %v value %v\n",
+						[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Op, args.Shard, args.Key, args.Value)
+					reply.Err = OK
+				}
+			case <-rc.timer.C:
+
+			}
 		}
 	} else {
 		fmt.Printf("[ErrorPut]: Args.ConfigNum %v Config %v Shard,Key {%v, %v} MigratingWaiting %v\n", args.ConfigNum, kv.curConfig.Num, args.Shard, args.Key, kv.shardMigrationWaitCh[args.Shard])
-		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 	}
 }
-
-//func (kv *ShardKV) TakeOverShard(args *TakeOverShardArgs, reply *TakeOverShardReply) {
-//	// 如果先migrating了
-//	kv.mu.Lock()
-//	if args.ConfigNum > kv.curConfig.Num {
-//		// 还未更新到最新到config
-//		// TODO
-//		//fmt.Printf("[TakeOverShard]: Gid %v Server %v Current %v Args Config %v\n", kv.gid, kv.me, kv.curConfig.Num, args.ConfigNum)
-//		reply.Err = ErrWrongLeader
-//		kv.mu.Unlock()
-//		return
-//	}
-//	kv.mu.Unlock()
-//	command := Op{
-//		Option:    "Migrating",
-//		Shard:     args.Shard,
-//		Data:      args.Data,
-//		Group:     args.Group,
-//		ConfigNum: args.ConfigNum,
-//	}
-//	_, _, isLeader := kv.rf.Start(command)
-//	if isLeader {
-//		kv.mu.Lock()
-//		waitCh := make(chan bool)
-//		waitTimer := time.NewTimer(time.Second)
-//		key := [2]int{args.Group, args.ConfigNum}
-//		fmt.Printf("[TakeOverShard]: Gid %v Migrating Shard %v Data %v From Group %v in Command %v\n", kv.gid, args.Shard, args.Data, args.Group, key)
-//		kv.migratingCh[key] = waitCh
-//		kv.migrationTimer[key] = waitTimer
-//		kv.mu.Unlock()
-//		select {
-//		case <-waitCh:
-//			fmt.Printf("[TakeOver]: Gid %v migration Map %v\n", kv.gid, args.Data)
-//			reply.Err = OK
-//		case <-waitTimer.C:
-//			logger.Printf("[KVGet]: Server %v Client %v Request %v timeout limit exceeds", kv.me, command.Clerk, command.RequestId)
-//			//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-//			reply.Err = ErrWrongLeader
-//		}
-//		//logger.Printf("[KVGet]: %v", msg)
-//	} else {
-//		reply.Err = ErrWrongLeader
-//	}
-//}
 
 func (kv *ShardKV) ApplyOperation() {
 	for kv.Killed() == false {
 		for msg := range kv.applyCh {
 			kv.mu.Lock()
-			//var key interface{}
-			//var b = false
 			if msg.CommandValid {
 				// logger.Printf("[ApplyOperation]: KV %v Receive %v", kv.me, msg.Command)
 				// 每个操作时需要携带当时接受RPC请求时的Config如果说在一个请求发送到apply期间，发生了config的转换，那么就需要拒绝该请求
 				op := msg.Command.(Op)
+				var rc *Receiver
+				b := false
 				if op.Option == "Get" || op.Option == "Put" || op.Option == "Append" {
 					key := [2]int{op.Clerk, op.RequestId}
+					rc = kv.msgReceiver[key]
 					if kv.duplicateTable[op.Clerk] < op.RequestId {
-						if kv.curConfig.Num != op.ConfigNum {
-							//fmt.Printf("[Error]: not equal config num %v cur %v\n", op.ConfigNum, kv.curConfig.Num)
-							kv.mu.Unlock()
-							// 此处直接continue的话，RPC调用过程会直到timer超时才结束，会导致用例TestJoinLeave的通过时间从1s～2s延长到3～4s
-							// 可以考虑修改ch的类型为bool，接收到true时返回，否则回退
-							// todo
-							continue
-						}
-						kv.duplicateTable[op.Clerk] = op.RequestId
-						switch op.Option {
-						case "Get":
-						case "Put":
-							if kv.kvPair[op.Shard] == nil {
-								kv.kvPair[op.Shard] = make(map[string]string)
+						if kv.curConfig.Num == op.ConfigNum {
+							b = true
+							kv.duplicateTable[op.Clerk] = op.RequestId
+							switch op.Option {
+							case "Get":
+							case "Put":
+								kv.kvPair[op.Shard][op.Key] = op.Value
+							case "Append":
+								initial := kv.kvPair[op.Shard][op.Key]
+								kv.kvPair[op.Shard][op.Key] = initial + op.Value
+							default:
+								logger.Printf("[ApplyOp]: Wrong Operation Type")
 							}
-							kv.kvPair[op.Shard][op.Key] = op.Value
-						case "Append":
-							if kv.kvPair[op.Shard] == nil {
-								kv.kvPair[op.Shard] = make(map[string]string)
-							}
-							initial := kv.kvPair[op.Shard][op.Key]
-							kv.kvPair[op.Shard][op.Key] = initial + op.Value
-						default:
-							logger.Printf("[ApplyOp]: Wrong Operation Type")
 						}
+					} else {
+						b = true
 					}
 					// Manual Chosen Number: Snapshot Interval
-					if kv.maxraftstate != -1 && msg.CommandIndex%100 == 0 {
-						kv.WritePersist(msg.CommandIndex)
-					}
-					if kv.waitCh[key] != nil && kv.waitTimer[key].Stop() == true {
-						waitCh := kv.waitCh[key]
-						logger.Printf("[ApplyOperation]: KV Gid %v %v Receive %v and go through waitCh", kv.gid, kv.me, msg.Command)
-						kv.mu.Unlock()
-						waitCh <- true
-						continue
-					}
 				} else if op.Option == "ConfigChange" {
-					if op.Config.Num <= kv.curConfig.Num {
-						kv.mu.Unlock()
-						// TODO 可以优化<-
-						continue
-					}
 					key := op.Config.Num
-					for i := 0; i < shardctrler.NShards; i++ {
-						if kv.curConfig.Shards[i] != kv.gid && op.Config.Shards[i] == kv.gid && kv.curConfig.Shards[i] != 0 {
-							// 需要等待migrating的shard
-						} else {
-							kv.shardMigrationWaitCh[i] = op.Config.Num
+					rc = kv.configRc[key]
+					if op.Config.Num > kv.curConfig.Num {
+						for i := 0; i < shardctrler.NShards; i++ {
+							if kv.curConfig.Shards[i] != kv.gid && op.Config.Shards[i] == kv.gid && kv.curConfig.Shards[i] != 0 {
+								// 需要等待migrating的shard
+							} else {
+								kv.shardMigrationWaitCh[i] = op.Config.Num
+							}
 						}
-					}
-					kv.curConfig = op.Config
-					if kv.maxraftstate != -1 {
-						kv.WritePersist(msg.CommandIndex)
-					}
-					kv.cfgChange += 1
-					//fmt.Printf("[ConfigChange]: %v current Config %v\n", kv.gid, op.Config.Num)
-					if kv.configChangeCh[key] != nil && kv.configChangeTimer[key].Stop() == true {
-						waitCh := kv.configChangeCh[key]
-						logger.Printf("[ApplyOperation]: KV Gid %v Server %v Receive %v and go through waitCh", kv.gid, kv.me, msg.Command)
-						kv.mu.Unlock()
-						waitCh <- true
-						continue
+						kv.curConfig = op.Config
+						kv.cfgChange += 1
 					}
 				} else if op.Option == "Migrating" {
-					if kv.shardMigrationWaitCh[op.Shard] >= op.ConfigNum {
-						// TODO
-						kv.mu.Unlock()
-						continue
-					}
 					key := [2]int{op.Shard, op.ConfigNum}
-					kv.kvPair[op.Shard] = op.Data
-					kv.shardMigrationWaitCh[op.Shard] = op.ConfigNum
-					for clerk, maxRequestId := range op.DuplicateTable {
-						kv.duplicateTable[clerk] = max(maxRequestId, kv.duplicateTable[clerk])
-					}
-					if kv.maxraftstate != -1 {
-						kv.WritePersist(msg.CommandIndex)
-					}
-					if kv.migratingCh[key] != nil && kv.migrationTimer[key].Stop() == true {
-						waitCh := kv.migratingCh[key]
-						logger.Printf("[ApplyOperation]: KV Gid %v Server %v Receive %v and go through waitCh", kv.gid, kv.me, msg.Command)
-						kv.mu.Unlock()
-						waitCh <- true
-						continue
+					rc = kv.migrateRc[key]
+					if kv.shardMigrationWaitCh[op.Shard] < op.ConfigNum {
+						b = true
+						for k, v := range op.Data {
+							kv.kvPair[op.Shard][k] = v
+						}
+						kv.shardMigrationWaitCh[op.Shard] = op.ConfigNum
+						for clerk, maxRequestId := range op.DuplicateTable {
+							kv.duplicateTable[clerk] = max(maxRequestId, kv.duplicateTable[clerk])
+						}
 					}
 				}
+				if kv.maxraftstate != -1 && msg.CommandIndex%100 == 0 {
+					kv.WritePersist(msg.CommandIndex)
+				}
 				kv.mu.Unlock()
+				kv.SendChannelMsg(rc, b)
 			} else if msg.SnapshotValid {
 				kv.ReadPersist(msg.Snapshot)
 				logger.Printf("[KVSnapshot]: KV %v read snapshot %v", kv.me, kv.kvPair)
 				kv.mu.Unlock()
 			}
 		}
+	}
+}
+
+func (kv *ShardKV) SendChannelMsg(rc *Receiver, msg bool) {
+	if rc != nil && rc.timer.Stop() == true {
+		rc.ch <- msg
 	}
 }
 
@@ -350,27 +277,30 @@ func (kv *ShardKV) ListenConfigChange() {
 			_, _, isLeader := kv.rf.Start(command)
 			if isLeader {
 				kv.mu.Lock()
-				waitCh := make(chan bool)
-				waitTimer := time.NewTimer(time.Second)
+				rc := Receiver{
+					ch:    make(chan bool),
+					timer: time.NewTimer(DefaultTimeout),
+				}
 				key := command.Config.Num
 				fmt.Printf("[ListenConfigChange]: Gid %v Config change from %v %v to %v %v\n", kv.gid, lastCfg.Num, lastCfg.Shards, cfg.Num, cfg.Shards)
-				kv.configChangeCh[key] = waitCh
-				kv.configChangeTimer[key] = waitTimer
+				kv.configRc[key] = &rc
 				kv.mu.Unlock()
 				select {
-				case <-waitCh:
-					shards := make([]int, 0)
-					for i := 0; i < shardctrler.NShards; i++ {
-						if lastCfg.Shards[i] != kv.gid && cfg.Shards[i] == kv.gid && lastCfg.Shards[i] != 0 {
-							shards = append(shards, i)
+				case msg := <-rc.ch:
+					if msg {
+						shards := make([]int, 0)
+						for i := 0; i < shardctrler.NShards; i++ {
+							if lastCfg.Shards[i] != kv.gid && cfg.Shards[i] == kv.gid && lastCfg.Shards[i] != 0 {
+								shards = append(shards, i)
+							}
 						}
+						kv.mu.Lock()
+						fmt.Printf("[ConfigChange]: Gid %v Current Shard %v waiting %v\n", kv.gid, kv.shardMigrationWaitCh, shards)
+						kv.mu.Unlock()
 					}
-					fmt.Printf("[ConfigChange]: Gid %v Current Shard %v waiting %v\n", kv.gid, kv.shardMigrationWaitCh, shards)
-				case <-waitTimer.C:
-					logger.Printf("[KVGet]: Server %v Client %v Request %v timeout limit exceeds", kv.me, command.Clerk, command.RequestId)
-					//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-				}
+				case <-rc.timer.C:
 
+				}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -403,7 +333,9 @@ func (kv *ShardKV) AskForShard(shard int, configNum int) {
 		Shard:     shard,
 		ConfigNum: configNum,
 	}
-	reply := AskForShardReply{}
+	reply := AskForShardReply{
+		Err: ErrWrongLeader,
+	}
 	kv.mu.Lock()
 	lastCfg := kv.mck.Query(configNum - 1)
 	kv.mu.Unlock()
@@ -422,28 +354,23 @@ func (kv *ShardKV) AskForShard(shard int, configNum int) {
 				_, _, isLeader := kv.rf.Start(command)
 				if isLeader {
 					kv.mu.Lock()
-					waitCh := make(chan bool)
-					waitTimer := time.NewTimer(time.Second)
+					rc := Receiver{
+						ch:    make(chan bool),
+						timer: time.NewTimer(DefaultTimeout),
+					}
 					key := [2]int{shard, configNum}
-					//fmt.Printf("[AskForCommand]: Gid %v Replicate Shard %v in Config %v Data %v\n", kv.gid, shard, configNum, reply.Data)
-					//fmt.Printf("[TakeOverShard]: Gid %v Migrating Shard %v Data %v From Group %v in Command %v\n", kv.gid, args.Shard, args.Data, args.Group, key)
-					kv.migratingCh[key] = waitCh
-					kv.migrationTimer[key] = waitTimer
+					kv.migrateRc[key] = &rc
 					kv.mu.Unlock()
 					select {
-					case <-waitCh:
-						kv.mu.Lock()
-						fmt.Printf("[AskFor]: Gid %v Replicate Shard %v Config %v Table %v Data %v\n", kv.gid, shard, configNum, kv.duplicateTable, reply.Data)
-						kv.mu.Unlock()
-						reply.Err = OK
-					case <-waitTimer.C:
-						logger.Printf("[KVGet]: Server %v Client %v Request %v timeout limit exceeds", kv.me, command.Clerk, command.RequestId)
-						//delete(kv.waitCh, [2]int{command.Clerk, command.RequestId})
-						reply.Err = ErrWrongLeader
+					case msg := <-rc.ch:
+						if msg {
+							kv.mu.Lock()
+							fmt.Printf("[AskFor]: Gid %v Replicate Shard %v Config %v Table %v Data %v\n", kv.gid, shard, configNum, kv.duplicateTable, reply.Data)
+							kv.mu.Unlock()
+							reply.Err = OK
+						}
+					case <-rc.timer.C:
 					}
-					//logger.Printf("[KVGet]: %v", msg)
-				} else {
-					reply.Err = ErrWrongLeader
 				}
 				return
 			}
@@ -498,6 +425,13 @@ func Copy(m map[string]string) map[string]string {
 	}
 	return r
 }
+func CopyMapInt2Int(m map[int]int) map[int]int {
+	r := make(map[int]int)
+	for k, v := range m {
+		r[k] = v
+	}
+	return r
+}
 
 // servers[] contains the ports of the servers in this group.
 //
@@ -547,20 +481,18 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	kv.waitTimer = make(map[[2]int]*time.Timer)
-	kv.waitCh = make(map[[2]int]chan bool)
+	kv.msgReceiver = make(map[[2]int]*Receiver)
+	kv.configRc = make(map[int]*Receiver)
+	kv.migrateRc = make(map[[2]int]*Receiver)
+
 	kv.duplicateTable = make(map[int]int)
 	kv.kvPair = make(map[int]map[string]string)
 
-	kv.configChangeCh = make(map[int]chan bool)
-	kv.configChangeTimer = make(map[int]*time.Timer)
-
-	kv.migratingCh = make(map[[2]int]chan bool)
-	kv.migrationTimer = make(map[[2]int]*time.Timer)
 	kv.migrationDupTable = make(map[int]int)
 	kv.shardMigrationWaitCh = make(map[int]int)
 	for i := 0; i < shardctrler.NShards; i++ {
 		kv.shardMigrationWaitCh[i] = 0
+		kv.kvPair[i] = make(map[string]string)
 	}
 	kv.ReadPersist(kv.rf.GetSnapshot())
 	go kv.ApplyOperation()
