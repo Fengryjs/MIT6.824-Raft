@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -56,6 +57,10 @@ type ShardKV struct {
 	migrationDupTable map[int]int
 
 	shardMigrationWaitCh map[int]int
+
+	t []int
+
+	logger log.Logger
 	// a server reply RPC requires:
 	// 1. args.configNum = kv.curConfig.Num
 	// 2. kv.shardMigrationWaitCh[args.Shard] == kv.curConfig.Num
@@ -63,7 +68,6 @@ type ShardKV struct {
 }
 
 type Receiver struct {
-	// TODO
 	ch    chan bool
 	timer *time.Timer
 }
@@ -71,12 +75,15 @@ type Receiver struct {
 const DefaultTimeout = 1 * time.Second
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	//fmt.Printf("[Get]: %v\n", kv.shardMigrationWaitCh)
-	//fmt.Printf("[Get]: %v\n", kv.curConfig)
-	kv.mu.Lock()
+	//logger.Printf("[Get]: %v\n", kv.shardMigrationWaitCh)
+	//logger.Printf("[Get]: %v\n", kv.curConfig)
 	reply.Err = ErrWrongLeader
-	if kv.curConfig.Shards[args.Shard] == kv.gid && kv.shardMigrationWaitCh[args.Shard] == args.ConfigNum {
-		kv.mu.Unlock()
+	logger.Printf("[Get]: Gid %v Server %v Op %v [Shard, Config] %v Get Key %v", kv.gid, kv.me, [2]int{args.Clerk, args.Request}, [2]int{args.Shard, args.ConfigNum}, args.Key)
+	kv.mu.Lock()
+	logger.Printf("[Get]: Gid %v Server %v Op %v [Shard, Config] %v Get Key %v Lock Success", kv.gid, kv.me, [2]int{args.Clerk, args.Request}, [2]int{args.Shard, args.ConfigNum}, args.Key)
+	condition := kv.curConfig.Shards[args.Shard] == kv.gid && kv.shardMigrationWaitCh[args.Shard] == args.ConfigNum
+	kv.mu.Unlock()
+	if condition {
 		command := Op{
 			Option:    "Get",
 			Key:       args.Key,
@@ -99,28 +106,29 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			case msg := <-rc.ch:
 				if msg {
 					kv.mu.Lock()
-					fmt.Printf("[ShardKV]: OpKey %v Config %v Gid %v Get Shard %v key %v value %v\n",
-						[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Shard, args.Key, kv.kvPair[args.Shard][args.Key])
+					//logger.Printf("[ShardKV]: OpKey %v Config %v Gid %v Get Shard %v key %v value %v\n",
+					//	[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Shard, args.Key, kv.kvPair[args.Shard][args.Key])
 					reply.Value = kv.kvPair[args.Shard][args.Key]
 					kv.mu.Unlock()
-					//logger.Printf("[KVGet]: server %v return key %v reply %v", kv.me, args.Key, kv.kvPair[args.Key])
 					reply.Err = OK
 				}
 			case <-rc.timer.C:
-
 			}
 		}
-	} else {
-		fmt.Printf("[ErrorGet]: Args.ConfigNum %v Config %v Shard,Key {%v, %v} MigratingWaiting %v\n", args.ConfigNum, kv.curConfig.Num, args.Shard, args.Key, kv.shardMigrationWaitCh[args.Shard])
-		kv.mu.Unlock()
 	}
+	//} else {
+	//	logger.Printf("[ErrorGet]: Args.ConfigNum %v Config %v Shard,Key {%v, %v} MigratingWaiting %v\n", args.ConfigNum, kv.curConfig.Num, args.Shard, args.Key, kv.shardMigrationWaitCh[args.Shard])
+	//}
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// PutAppend 操作如果在 raft 层实现共识时，config已经更换了，应该更换 group
-	kv.mu.Lock()
+	logger.Printf("[PutAppend]: Gid %v Server %v Op %v [Shard, Config] %v %v Key %v %v", kv.gid, kv.me, [2]int{args.Clerk, args.Request}, [2]int{args.Shard, args.ConfigNum}, args.Op, args.Key, args.Value)
 	reply.Err = ErrWrongLeader
-	if kv.curConfig.Shards[args.Shard] == kv.gid && kv.shardMigrationWaitCh[args.Shard] == args.ConfigNum {
+	kv.mu.Lock()
+	logger.Printf("[PutAppend]: Gid %v Server %v Op %v [Shard, Config] %v %v Key %v %v Lock Success", kv.gid, kv.me, [2]int{args.Clerk, args.Request}, [2]int{args.Shard, args.ConfigNum}, args.Op, args.Key, args.Value)
+	condition := kv.curConfig.Shards[args.Shard] == kv.gid && kv.shardMigrationWaitCh[args.Shard] == args.ConfigNum
+	kv.mu.Unlock()
+	if condition {
 		command := Op{
 			Option:    args.Op,
 			Key:       args.Key,
@@ -130,7 +138,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			Clerk:     args.Clerk,
 			RequestId: args.Request,
 		}
-		kv.mu.Unlock()
 		_, _, isLeader := kv.rf.Start(command)
 		if isLeader {
 			kv.mu.Lock()
@@ -144,18 +151,17 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			select {
 			case msg := <-rc.ch:
 				if msg {
-					fmt.Printf("[ShardKV]: OpKey %v Config %v Gid %v %v Shard %v key %v value %v\n",
-						[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Op, args.Shard, args.Key, args.Value)
+					//logger.Printf("[ShardKV]: OpKey %v Config %v Gid %v %v Shard %v key %v value %v\n",
+					//	[2]int{command.Clerk, command.RequestId}, args.ConfigNum, kv.gid, args.Op, args.Shard, args.Key, args.Value)
 					reply.Err = OK
 				}
 			case <-rc.timer.C:
-
 			}
 		}
-	} else {
-		fmt.Printf("[ErrorPut]: Args.ConfigNum %v Config %v Shard,Key {%v, %v} MigratingWaiting %v\n", args.ConfigNum, kv.curConfig.Num, args.Shard, args.Key, kv.shardMigrationWaitCh[args.Shard])
-		kv.mu.Unlock()
 	}
+	//else {
+	//	logger.Printf("[ErrorPut]: Args.ConfigNum %v Config %v Shard,Key {%v, %v} MigratingWaiting %v\n", args.ConfigNum, kv.curConfig.Num, args.Shard, args.Key, kv.shardMigrationWaitCh[args.Shard])
+	//}
 }
 
 func (kv *ShardKV) ApplyOperation() {
@@ -163,12 +169,11 @@ func (kv *ShardKV) ApplyOperation() {
 		for msg := range kv.applyCh {
 			kv.mu.Lock()
 			if msg.CommandValid {
-				// logger.Printf("[ApplyOperation]: KV %v Receive %v", kv.me, msg.Command)
-				// 每个操作时需要携带当时接受RPC请求时的Config如果说在一个请求发送到apply期间，发生了config的转换，那么就需要拒绝该请求
 				op := msg.Command.(Op)
-				var rc *Receiver
+				var rc *Receiver = nil
 				b := false
 				if op.Option == "Get" || op.Option == "Put" || op.Option == "Append" {
+					kv.logger.Printf("[ApplyOperation]: Gid %v Server %v Msg %v %v Shard %v Config %v", kv.gid, kv.me, msg.CommandIndex, op.Option, op.Shard, op.ConfigNum)
 					key := [2]int{op.Clerk, op.RequestId}
 					rc = kv.msgReceiver[key]
 					if kv.duplicateTable[op.Clerk] < op.RequestId {
@@ -183,32 +188,36 @@ func (kv *ShardKV) ApplyOperation() {
 								initial := kv.kvPair[op.Shard][op.Key]
 								kv.kvPair[op.Shard][op.Key] = initial + op.Value
 							default:
-								logger.Printf("[ApplyOp]: Wrong Operation Type")
+								kv.logger.Printf("[ApplyOp]: Wrong Operation Type")
 							}
 						}
 					} else {
 						b = true
 					}
-					// Manual Chosen Number: Snapshot Interval
+					if rc != nil && rc.timer.Stop() == true {
+						//kv.logger.Printf("[Send]: Gid %v Server %v try to send", kv.gid, kv.me)
+						rc.ch <- b
+						//kv.logger.Printf("[Send]: Gid %v Server %v try to send Success", kv.gid, kv.me)
+					}
 				} else if op.Option == "ConfigChange" {
-					key := op.Config.Num
-					rc = kv.configRc[key]
-					if op.Config.Num > kv.curConfig.Num {
+					kv.logger.Printf("[ApplyOperation]: Gid %v Server %v Msg %v %v %v", kv.gid, kv.me, msg.CommandIndex, op.Option, op.Config)
+					if op.Config.Num == kv.curConfig.Num+1 {
 						for i := 0; i < shardctrler.NShards; i++ {
-							if kv.curConfig.Shards[i] != kv.gid && op.Config.Shards[i] == kv.gid && kv.curConfig.Shards[i] != 0 {
-								// 需要等待migrating的shard
-							} else {
-								kv.shardMigrationWaitCh[i] = op.Config.Num
+							waitMigrateFromOther := kv.curConfig.Shards[i] != kv.gid && op.Config.Shards[i] == kv.gid && kv.curConfig.Shards[i] != 0
+							waitMigrateToOther := kv.curConfig.Shards[i] == kv.gid && op.Config.Shards[i] != kv.gid && op.Config.Shards[i] != 0
+							if waitMigrateFromOther {
+								continue
+							} else if waitMigrateToOther {
+								kv.t = append(kv.t, i)
 							}
+							kv.shardMigrationWaitCh[i] = op.Config.Num
 						}
 						kv.curConfig = op.Config
 						kv.cfgChange += 1
 					}
-				} else if op.Option == "Migrating" {
-					key := [2]int{op.Shard, op.ConfigNum}
-					rc = kv.migrateRc[key]
+				} else if op.Option == "Receive" {
+					kv.logger.Printf("[ApplyOperation]: Gid %v Server %v Msg %v %v Shard %v Data %v Table %v", kv.gid, kv.me, msg.CommandIndex, op.Option, op.Shard, op.Data, op.DuplicateTable)
 					if kv.shardMigrationWaitCh[op.Shard] < op.ConfigNum {
-						b = true
 						for k, v := range op.Data {
 							kv.kvPair[op.Shard][k] = v
 						}
@@ -217,93 +226,92 @@ func (kv *ShardKV) ApplyOperation() {
 							kv.duplicateTable[clerk] = max(maxRequestId, kv.duplicateTable[clerk])
 						}
 					}
+				} else if op.Option == "Transfer" {
+					kv.logger.Printf("[ApplyOperation]: Gid %v Server %v Msg %v %v Shard %v", kv.gid, kv.me, msg.CommandIndex, op.Option, op.Shard)
+					length := len(kv.t)
+					for i := 0; i < length; i++ {
+						if kv.t[i] == op.Shard {
+							for k := range kv.kvPair[op.Shard] {
+								delete(kv.kvPair[op.Shard], k)
+							}
+							kv.t = append(kv.t[:i], kv.t[i+1:]...)
+							//logger.Printf("[Transfer]: Gid %v Server %v Transfer Shard %v Config %v Current t %v\n", kv.gid, kv.me, op.Shard, op.ConfigNum, kv.t)
+							break
+						}
+					}
+					kv.logger.Printf(
+						"[AfterTransfer]: KVPair %v\n"+
+							"[AfterTransfer]: Duplicate %v\n"+
+							"[AfterTransfer]: ShardConfig %v\n"+
+							"[AfterTransfer]: t %v", kv.kvPair, kv.duplicateTable, kv.shardMigrationWaitCh, kv.t)
 				}
-				if kv.maxraftstate != -1 && msg.CommandIndex%100 == 0 {
+				// Manual Chosen Number: Snapshot Interval
+				if kv.maxraftstate != -1 && (msg.CommandIndex%50 == 0 || kv.rf.GetRaftStateSize() > kv.maxraftstate*8) {
+					//fmt.Printf("Gid %v Server %v %v\n", kv.gid, kv.me, kv.rf.GetRaftStateSize())
+					//kv.logger.Printf("[WritePersist]: Gid %v Server %v Try to write", kv.gid, kv.me)
 					kv.WritePersist(msg.CommandIndex)
+					//kv.logger.Printf("[WritePersist]: Gid %v Server %v write success", kv.gid, kv.me)
 				}
-				kv.mu.Unlock()
-				kv.SendChannelMsg(rc, b)
 			} else if msg.SnapshotValid {
+				kv.logger.Printf("[KVSnapshot]: Gid %v Server %v Read snapshot %v", kv.gid, kv.me, msg.SnapshotIndex)
 				kv.ReadPersist(msg.Snapshot)
-				logger.Printf("[KVSnapshot]: KV %v read snapshot %v", kv.me, kv.kvPair)
-				kv.mu.Unlock()
 			}
+			//kv.logger.Printf("[ApplyOperation]: Gid %v Server %v try to unlock", kv.gid, kv.me)
+			kv.mu.Unlock()
+			//kv.logger.Printf("[ApplyOperation]: Gid %v Server %v Msg %v Unlock Success", kv.gid, kv.me, msg.CommandIndex)
 		}
 	}
 }
 
-func (kv *ShardKV) SendChannelMsg(rc *Receiver, msg bool) {
-	if rc != nil && rc.timer.Stop() == true {
-		rc.ch <- msg
-	}
-}
-
-// [ListenConfigChange]: Gid 100 Config change from 1 [100 100 100 100 100 100 100 100 100 100] to 2 [101 101 101 101 101 100 100 100 100 100] in Command 2
-// [ListenConfigChange]: Gid 102 Config change from 1 [100 100 100 100 100 100 100 100 100 100] to 2 [101 101 101 101 101 100 100 100 100 100] in Command 2
-// [Clerk]: leave [100]
-// [ListenConfigChange]: Gid 101 Config change from 1 [100 100 100 100 100 100 100 100 100 100] to 3 [102 102 101 101 101 102 100 100 100 100] in Command 3
-// 如果说，我们一下子进行了多个config的切换，
-// 那么，几个config之间的迁移还没有完成，那么就会有多个shard的切换，每个server的waiting，都需要从1-N线性地变换
-// 就是说，必须从n到n+1到n+2这样变换，都必须
-
 func (kv *ShardKV) ListenConfigChange() {
 	for kv.Killed() == false {
+		var condition = false
+		//logger.Printf("[ListenConfig]: Gid %v Server %v", kv.gid, kv.me)
 		kv.mu.Lock()
+		//logger.Printf("[ListenConfig]: Gid %v Server %v Lock Success", kv.gid, kv.me)
 		cfg := kv.mck.Query(-1)
-		// todo
-		// maybe the shard one server take for are unchanged, the shard for other changed of mapping changed
-		// the config should change too?
 		lastCfg := kv.curConfig
-		kv.mu.Unlock()
 		if lastCfg.Num != cfg.Num {
+			condition = true
 			if cfg.Num != lastCfg.Num+1 {
 				cfg = kv.mck.Query(lastCfg.Num + 1)
 			}
-			kv.mu.Lock()
-			updated := true
 			for i := 0; i < shardctrler.NShards; i++ {
 				if kv.shardMigrationWaitCh[i] != lastCfg.Num {
-					updated = false
+					condition = false
 				}
 			}
-			kv.mu.Unlock()
-			if updated == false {
-				continue
-			}
+			condition = condition && len(kv.t) == 0
+		}
+		kv.mu.Unlock()
+		if condition {
 			command := Op{
 				Option: "ConfigChange",
 				Config: cfg,
 			}
-			_, _, isLeader := kv.rf.Start(command)
-			if isLeader {
-				kv.mu.Lock()
-				rc := Receiver{
-					ch:    make(chan bool),
-					timer: time.NewTimer(DefaultTimeout),
-				}
-				key := command.Config.Num
-				fmt.Printf("[ListenConfigChange]: Gid %v Config change from %v %v to %v %v\n", kv.gid, lastCfg.Num, lastCfg.Shards, cfg.Num, cfg.Shards)
-				kv.configRc[key] = &rc
-				kv.mu.Unlock()
-				select {
-				case msg := <-rc.ch:
-					if msg {
-						shards := make([]int, 0)
-						for i := 0; i < shardctrler.NShards; i++ {
-							if lastCfg.Shards[i] != kv.gid && cfg.Shards[i] == kv.gid && lastCfg.Shards[i] != 0 {
-								shards = append(shards, i)
-							}
-						}
-						kv.mu.Lock()
-						fmt.Printf("[ConfigChange]: Gid %v Current Shard %v waiting %v\n", kv.gid, kv.shardMigrationWaitCh, shards)
-						kv.mu.Unlock()
-					}
-				case <-rc.timer.C:
-
-				}
-			}
+			kv.rf.Start(command)
+			//if isLeader {
+			//	kv.mu.Lock()
+			//	rc := Receiver{
+			//		ch:    make(chan bool),
+			//		timer: time.NewTimer(DefaultTimeout),
+			//	}
+			//	key := command.Config.Num
+			//	logger.Printf("[ListenConfigChange]: Gid %v Config change from %v %v to %v %v\n", kv.gid, lastCfg.Num, lastCfg.Shards, cfg.Num, cfg.Shards)
+			//	kv.configRc[key] = &rc
+			//	kv.mu.Unlock()
+			//	select {
+			//	case msg := <-rc.ch:
+			//		if msg {
+			//			kv.mu.Lock()
+			//			logger.Printf("[ConfigChange]: Gid %v Current ShardConfig %v kv.t %v\n", kv.gid, kv.shardMigrationWaitCh, kv.t)
+			//			kv.mu.Unlock()
+			//		}
+			//	case <-rc.timer.C:
+			//	}
+			//}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 func (kv *ShardKV) ReplicateShard(args *AskForShardArgs, reply *AskForShardReply) {
@@ -311,23 +319,37 @@ func (kv *ShardKV) ReplicateShard(args *AskForShardArgs, reply *AskForShardReply
 	defer kv.mu.Unlock()
 	if kv.curConfig.Num >= args.ConfigNum {
 		reply.Err = OK
-		reply.Data = kv.kvPair[args.Shard]
-		reply.DuplicateTable = kv.duplicateTable
+		reply.Data = CopyMapStr2Str(kv.kvPair[args.Shard])
+		reply.DuplicateTable = CopyMapInt2Int(kv.duplicateTable)
+	}
+}
+func (kv *ShardKV) CheckShard(args *CheckTransferArgs, reply *CheckTransferReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.curConfig.Num >= args.ConfigNum && kv.shardMigrationWaitCh[args.Shard] >= args.ConfigNum {
+		reply.Err = OK
+		reply.Complete = true
 	}
 }
 func (kv *ShardKV) UpdateShard() {
 	for kv.Killed() == false {
+		//fmt.Printf("[UpdateShard] Still run\n")
 		kv.mu.Lock()
 		for i := 0; i < shardctrler.NShards; i++ {
 			if kv.curConfig.Shards[i] == kv.gid && kv.shardMigrationWaitCh[i] != kv.curConfig.Num {
 				go kv.AskForShard(i, kv.curConfig.Num)
 			}
 		}
+		for _, shard := range kv.t {
+			go kv.CheckTransfer(shard, kv.curConfig.Num)
+		}
 		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
+
 func (kv *ShardKV) AskForShard(shard int, configNum int) {
+	//fmt.Printf("[AskForShard] Still run\n")
 	// 需要负责的主动寻求上任Group进行复制
 	args := AskForShardArgs{
 		Shard:     shard,
@@ -343,35 +365,69 @@ func (kv *ShardKV) AskForShard(shard int, configNum int) {
 		server := kv.make_end(name)
 		if ok := server.Call("ShardKV.ReplicateShard", &args, &reply); ok {
 			if reply.Err == OK {
+				kv.mu.Lock()
+				if kv.shardMigrationWaitCh[shard] >= configNum {
+					kv.mu.Unlock()
+					return
+				}
+				kv.mu.Unlock()
 				// 将DuplicateTable一并复制
 				command := Op{
-					Option:         "Migrating",
+					Option:         "Receive",
 					Shard:          shard,
 					Data:           reply.Data,
 					DuplicateTable: reply.DuplicateTable,
 					ConfigNum:      configNum,
 				}
-				_, _, isLeader := kv.rf.Start(command)
-				if isLeader {
-					kv.mu.Lock()
-					rc := Receiver{
-						ch:    make(chan bool),
-						timer: time.NewTimer(DefaultTimeout),
-					}
-					key := [2]int{shard, configNum}
-					kv.migrateRc[key] = &rc
-					kv.mu.Unlock()
-					select {
-					case msg := <-rc.ch:
-						if msg {
-							kv.mu.Lock()
-							fmt.Printf("[AskFor]: Gid %v Replicate Shard %v Config %v Table %v Data %v\n", kv.gid, shard, configNum, kv.duplicateTable, reply.Data)
-							kv.mu.Unlock()
-							reply.Err = OK
-						}
-					case <-rc.timer.C:
-					}
+				kv.rf.Start(command)
+				return
+			}
+		}
+	}
+}
+func (kv *ShardKV) CheckTransfer(shard int, configNum int) {
+	//fmt.Printf("[CheckTransfer] still run\n")
+	// 需要负责的主动寻求上任Group进行复制
+	args := CheckTransferArgs{
+		Shard:     shard,
+		ConfigNum: configNum,
+	}
+	reply := CheckTransferReply{
+		Err:      ErrWrongLeader,
+		Complete: false,
+	}
+	kv.mu.Lock()
+	lastCfg := kv.curConfig
+	kv.mu.Unlock()
+	for _, name := range lastCfg.Groups[lastCfg.Shards[shard]] {
+		server := kv.make_end(name)
+		if ok := server.Call("ShardKV.CheckShard", &args, &reply); ok {
+			if reply.Err == OK {
+				// 将DuplicateTable一并复制
+				command := Op{
+					Option:    "Transfer",
+					Shard:     shard,
+					ConfigNum: configNum,
 				}
+				kv.rf.Start(command)
+				//if isLeader {
+				//	kv.mu.Lock()
+				//	rc := Receiver{
+				//		ch:    make(chan bool),
+				//		timer: time.NewTimer(DefaultTimeout),
+				//	}
+				//	key := [2]int{shard, configNum}
+				//	kv.migrateRc[key] = &rc
+				//	kv.mu.Unlock()
+				//	select {
+				//	case msg := <-rc.ch:
+				//		if msg {
+				//			logger.Printf("[TransferShard]: Gid %v Remove Shard %v Config %v\n", kv.gid, shard, configNum)
+				//			reply.Err = OK
+				//		}
+				//	case <-rc.timer.C:
+				//	}
+				//}
 				return
 			}
 		}
@@ -396,14 +452,17 @@ func (kv *ShardKV) ReadPersist(snapshot []byte) {
 	if snapshot != nil && len(snapshot) > 0 {
 		w := bytes.NewBuffer(snapshot)
 		d := labgob.NewDecoder(w)
-		if d.Decode(&kv.kvPair) != nil || d.Decode(&kv.duplicateTable) != nil ||
-			d.Decode(&kv.curConfig) != nil || d.Decode(&kv.shardMigrationWaitCh) != nil {
+		if d.Decode(&kv.kvPair) != nil || d.Decode(&kv.duplicateTable) != nil || d.Decode(&kv.curConfig) != nil ||
+			d.Decode(&kv.shardMigrationWaitCh) != nil || d.Decode(&kv.t) != nil {
 			log.Fatalf("[ReadPersist]: KV %v load persist error", kv.me)
 		} else {
-			fmt.Printf("[ShardKV]: Start Config\n"+
+			applyChLogger.Printf("[ShardKV]: Gid %v Server %v Read Config\n"+
 				"===  Data     %v\n"+
 				"===  Config   %v\n"+
-				"===  DupTable %v\n", kv.kvPair, kv.curConfig, kv.duplicateTable)
+				"===  DupTable %v\n"+
+				"===  ShardCfg %v\n"+
+				"===  T        %v\n", kv.gid, kv.me,
+				kv.kvPair, kv.curConfig, kv.duplicateTable, kv.shardMigrationWaitCh, kv.t)
 		}
 	}
 }
@@ -413,12 +472,14 @@ func (kv *ShardKV) WritePersist(index int) {
 	b := new(bytes.Buffer)
 	e := labgob.NewEncoder(b)
 	if e.Encode(kv.kvPair) == nil && e.Encode(kv.duplicateTable) == nil &&
-		e.Encode(kv.curConfig) == nil && e.Encode(kv.shardMigrationWaitCh) == nil {
+		e.Encode(kv.curConfig) == nil && e.Encode(kv.shardMigrationWaitCh) == nil && e.Encode(kv.t) == nil {
+		kv.logger.Printf("[WritePersist]: Gid %v Server %v Snapshot %v", kv.gid, kv.me, index)
 		kv.rf.Snapshot(index, b.Bytes())
+		kv.logger.Printf("[WritePersist]: Gid %v Server %v Snapshot success", kv.gid, kv.me)
 	}
 }
 
-func Copy(m map[string]string) map[string]string {
+func CopyMapStr2Str(m map[string]string) map[string]string {
 	r := make(map[string]string)
 	for k, v := range m {
 		r[k] = v
@@ -494,6 +555,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		kv.shardMigrationWaitCh[i] = 0
 		kv.kvPair[i] = make(map[string]string)
 	}
+	applyChLogger.Printf("Gid %v Server %v Start", kv.gid, kv.me)
+	// 没有restart
+	name := fmt.Sprintf("Gid-%v-Server-%v.log", gid, me)
+	file, _ := os.Create(name)
+	kv.logger = *log.New(file, "", log.Lmicroseconds)
 	kv.ReadPersist(kv.rf.GetSnapshot())
 	go kv.ApplyOperation()
 	go kv.ListenConfigChange()

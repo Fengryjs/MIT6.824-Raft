@@ -18,9 +18,11 @@ import "math/big"
 import "6.5840/shardctrler"
 import "time"
 
-var shardKVRaftLog = "shardKVRaftLog.txt"
+var shardKVRaftLog = "shardKVRaft.log"
 var f, _ = os.Create(shardKVRaftLog)
+var applyLog, _ = os.Create("applyCh.log")
 var logger = log.New(f, "", log.Lmicroseconds)
+var applyChLogger = log.New(applyLog, "", log.Lmicroseconds)
 var clerkId = 0
 
 // which shard is a key in?
@@ -81,11 +83,11 @@ func (ck *Clerk) Get(key string) string {
 	}
 	ck.request += 1
 	for {
-		logger.Printf("[ClerkGet]: OpKey %v Get %v", [2]int{args.Clerk, args.Request}, key)
 		shard := key2shard(key)
 		args.Shard = shard
 		args.ConfigNum = ck.config.Num
 		gid := ck.config.Shards[shard]
+		logger.Printf("[ClerkGet]: OpKey [Clerk:%v, Request:%v] Config %v Get [Shard:%v, Key:%v]\n", args.Clerk, args.Request, args.ConfigNum, shard, key)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -119,11 +121,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	ck.request += 1
 	for {
-		logger.Printf("[ClerkPutAppend]: OpKey %v %v Key %v Value %v", [2]int{args.Clerk, args.Request}, op, key, value)
 		shard := key2shard(key)
 		args.Shard = shard
 		args.ConfigNum = ck.config.Num
 		gid := ck.config.Shards[shard]
+		logger.Printf("[ClerkPutAppend]: OpKey [Clerk:%v, Request:%v] Config %v %v [Shard:%v, Key:%v] Value %v\n", args.Clerk, args.Request, ck.config.Num, op, shard, key, value)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])

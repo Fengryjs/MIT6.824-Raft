@@ -51,17 +51,6 @@ type GetReply struct {
 	Value string
 }
 
-type TakeOverShardArgs struct {
-	Shard     int
-	Data      map[int]map[string]string
-	Group     int
-	ConfigNum int
-}
-
-type TakeOverShardReply struct {
-	Err Err
-}
-
 type AskForShardArgs struct {
 	Shard     int
 	ConfigNum int
@@ -71,4 +60,12 @@ type AskForShardReply struct {
 	Err            string
 	Data           map[string]string
 	DuplicateTable map[int]int
+}
+type CheckTransferArgs struct {
+	Shard     int
+	ConfigNum int
+}
+type CheckTransferReply struct {
+	Err      string
+	Complete bool
 }

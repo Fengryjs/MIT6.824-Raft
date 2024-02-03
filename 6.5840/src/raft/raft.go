@@ -84,7 +84,7 @@ type Raft struct {
 
 }
 
-var file = "RaftLog.txt"
+var file = "Raft.log"
 var f, _ = os.Create(file)
 var logger = log.New(f, "", log.Lmicroseconds)
 
@@ -121,7 +121,6 @@ type Log struct {
 type Snapshot struct {
 	LastIncludedIndex int
 	LastIncludedTerm  int
-	State             interface{}
 }
 
 // return currentTerm and whether this server
@@ -212,7 +211,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.snapshot = Snapshot{
 		LastIncludedIndex: index,
 		LastIncludedTerm:  rf.log[logIndex-1].Term,
-		State:             nil,
 	}
 	rf.log = rf.log[logIndex:]
 	rf.lastApplied = max(rf.lastApplied, index) // 当调用snapshot后，crash的server被重启，需要将刷新lastApplied，
@@ -400,6 +398,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for {
 		if lastSameIndex == len(rf.log) {
 			rf.log = append(rf.log, args.Entries[appendIndex:]...)
+			break
 		}
 		if appendIndex == len(args.Entries) {
 			break
@@ -457,6 +456,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 	}
 	rf.persist(args.Data)
+	rf.mu.Unlock()
 	rf.applyCh <- ApplyMsg{
 		CommandValid:  false,
 		Command:       nil,
@@ -466,7 +466,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
-	rf.mu.Unlock()
 }
 func (rf *Raft) SendInstallSnapshot(server int) {
 	rf.mu.Lock()
@@ -765,7 +764,12 @@ func (rf *Raft) SendHeartBeat(i int) {
 				return
 			}
 		}
-		args.Entries = rf.log[rf.nextIndex[i]-rf.snapshot.LastIncludedIndex-1:]
+		if rf.nextIndex[i]-rf.snapshot.LastIncludedIndex > 0 {
+			args.Entries = rf.log[rf.nextIndex[i]-rf.snapshot.LastIncludedIndex-1:]
+		} else {
+			rf.mu.Unlock()
+			return
+		}
 		//args.Entries
 		rf.mu.Unlock()
 		//logger.Printf("[SendHeartBeat]: send heartbeat to %v", i)
@@ -880,7 +884,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.snapshot = Snapshot{
 		LastIncludedIndex: 0,
 		LastIncludedTerm:  0,
-		State:             nil,
 	}
 	// Your initialization code here (2A, 2B, 2C).
 
@@ -906,4 +909,10 @@ func (rf *Raft) GetSnapshot() []byte {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.persister.ReadSnapshot()
+}
+
+func (rf *Raft) GetSnapshotSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.SnapshotSize()
 }

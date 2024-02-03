@@ -2,6 +2,7 @@ package shardctrler
 
 import (
 	"6.5840/raft"
+	"log"
 	"math"
 	"sort"
 	"time"
@@ -295,12 +296,14 @@ func (sc *ShardCtrler) ApplyOperation() {
 				}
 				if sc.waitCh[key] != nil && sc.waitTimer[key].Stop() == true {
 					waitCh := sc.waitCh[key]
-					logger.Printf("[ApplyOperation]: sc %v Receive %v and go through waitCh", sc.me, msg.Command)
+					logger.Printf("[ApplyOperation]: sc %v Receive %v %v Latest Config %v", sc.me, [2]int{op.Clerk, op.RequestId}, op.Option, sc.configs[len(sc.configs)-1])
 					sc.mu.Unlock()
 					waitCh <- msg
 					continue
 				}
 				sc.mu.Unlock()
+			} else {
+				log.Fatal("111")
 			}
 		}
 	}

@@ -6,7 +6,6 @@ package shardctrler
 
 import (
 	"6.5840/labrpc"
-	"fmt"
 	"log"
 	"os"
 )
@@ -14,7 +13,7 @@ import "time"
 import "crypto/rand"
 import "math/big"
 
-var shardCtrlerLog = "ShardCtrlerLog.txt"
+var shardCtrlerLog = "ShardCtrler.log"
 var f, _ = os.Create(shardCtrlerLog)
 var logger = log.New(f, "", log.Lmicroseconds)
 var ClerkId = 0
@@ -66,7 +65,7 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	fmt.Printf("[Clerk]: join %v\n", servers)
+	logger.Printf("[Clerk]: join %v\n", servers)
 	args := &JoinArgs{
 		Servers: servers,
 		Clerk:   ck.id,
@@ -89,7 +88,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	fmt.Printf("[Clerk]: leave %v\n", gids)
+	logger.Printf("[Clerk]: leave %v\n", gids)
 	args := &LeaveArgs{
 		GIDs:    gids,
 		Clerk:   ck.id,
@@ -112,7 +111,7 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	fmt.Printf("[Clerk]: move shard %v gid %v\n", shard, gid)
+	logger.Printf("[Clerk]: move shard %v gid %v\n", shard, gid)
 	args := &MoveArgs{
 		Shard:   shard,
 		GID:     gid,
